@@ -338,26 +338,26 @@ fn parse_mcp_call(value: &serde_json::Value) -> std::result::Result<JsonRpcCallI
             params: flatten_jsonrpc_params_opt(request.params.as_ref())?,
             tool: mcp_tool_name(&mcp_request),
         });
-    } else {
-        // Notifications have no id and no response expectation. Validate them
-        // as MCP notifications but keep extension notifications addressable.
-        let notification: JsonRpcNotification = serde_json::from_value(value.clone())
-            .map_err(|error| format!("invalid MCP notification: {error}"))?;
-        if notification.jsonrpc != JSONRPC_VERSION {
-            return Err(format!(
-                "unsupported JSON-RPC version '{}'",
-                notification.jsonrpc
-            ));
-        }
-        McpNotification::from_jsonrpc(&notification)
-            .map_err(|error| format!("invalid MCP notification params: {error}"))?;
-
-        return Ok(JsonRpcCallInfo {
-            method: notification.method,
-            params: flatten_jsonrpc_params_opt(notification.params.as_ref())?,
-            tool: None,
-        });
     }
+
+    // Notifications have no id and no response expectation. Validate them as
+    // MCP notifications but keep extension notifications addressable.
+    let notification: JsonRpcNotification = serde_json::from_value(value.clone())
+        .map_err(|error| format!("invalid MCP notification: {error}"))?;
+    if notification.jsonrpc != JSONRPC_VERSION {
+        return Err(format!(
+            "unsupported JSON-RPC version '{}'",
+            notification.jsonrpc
+        ));
+    }
+    McpNotification::from_jsonrpc(&notification)
+        .map_err(|error| format!("invalid MCP notification params: {error}"))?;
+
+    Ok(JsonRpcCallInfo {
+        method: notification.method,
+        params: flatten_jsonrpc_params_opt(notification.params.as_ref())?,
+        tool: None,
+    })
 }
 
 fn flatten_jsonrpc_params(

@@ -288,7 +288,7 @@ enum QueryMatcherDef {
 #[serde(untagged)]
 enum ParamMatcherDef {
     Matcher(QueryMatcherDef),
-    Object(BTreeMap<String, ParamMatcherDef>),
+    Object(BTreeMap<String, Self>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
