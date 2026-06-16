@@ -216,7 +216,9 @@ where
                 .into_diagnostic()?;
             Ok(())
         }
-        L7Protocol::JsonRpc => relay_jsonrpc(config, &engine, client, upstream, ctx).await,
+        L7Protocol::JsonRpc | L7Protocol::Mcp => {
+            relay_jsonrpc(config, &engine, client, upstream, ctx).await
+        }
     }
 }
 
@@ -310,6 +312,37 @@ where
         } else {
             None
         };
+        let jsonrpc_info = if config.protocol.is_jsonrpc_family() {
+            match crate::l7::http::read_body_for_inspection(
+                client,
+                &mut req,
+                config.json_rpc_max_body_bytes,
+            )
+            .await
+            {
+                Ok(body) => Some(crate::l7::jsonrpc::parse_jsonrpc_body_with_mode(
+                    &body,
+                    jsonrpc_inspection_mode(config.protocol),
+                )),
+                Err(e) => {
+                    if is_benign_connection_error(&e) {
+                        debug!(
+                            host = %ctx.host,
+                            port = ctx.port,
+                            error = %e,
+                            "JSON-RPC L7 connection closed"
+                        );
+                    } else {
+                        let detail =
+                            parse_rejection_detail(&e.to_string(), ParseRejectionMode::L7Endpoint);
+                        emit_parse_rejection(ctx, &detail, "l7-jsonrpc");
+                    }
+                    return Ok(());
+                }
+            }
+        } else {
+            None
+        };
 
         if close_if_stale(engine.generation_guard(), ctx) {
             return Ok(());
@@ -340,7 +373,7 @@ where
             target: redacted_target.clone(),
             query_params: req.query_params.clone(),
             graphql: graphql_info.clone(),
-            jsonrpc: None,
+            jsonrpc: jsonrpc_info.clone(),
         };
         let websocket_request = crate::l7::rest::request_is_websocket_upgrade(&req.raw_header);
         if config.protocol == L7Protocol::Websocket && !websocket_request {
@@ -364,7 +397,13 @@ where
         let parse_error_reason = graphql_info
             .as_ref()
             .and_then(|info| info.error.as_deref())
-            .map(|error| format!("GraphQL request rejected: {error}"));
+            .map(|error| format!("GraphQL request rejected: {error}"))
+            .or_else(|| {
+                jsonrpc_info
+                    .as_ref()
+                    .and_then(|info| info.error.as_deref())
+                    .map(|error| format!("JSON-RPC request rejected: {error}"))
+            });
         let force_deny = parse_error_reason.is_some();
         let (allowed, reason) = if let Some(reason) = parse_error_reason {
             (false, reason)
@@ -385,8 +424,12 @@ where
         let engine_type = match config.protocol {
             L7Protocol::Graphql => "l7-graphql",
             L7Protocol::Websocket => "l7-websocket",
-            L7Protocol::Rest | L7Protocol::Sql | L7Protocol::JsonRpc => "l7",
+            L7Protocol::JsonRpc => "l7-jsonrpc",
+            L7Protocol::Mcp => "l7-mcp",
+            L7Protocol::Rest | L7Protocol::Sql => "l7",
         };
+        let protocol_summary =
+            l7_protocol_log_summary(graphql_info.as_ref(), jsonrpc_info.as_ref());
         emit_l7_request_log(
             ctx,
             &request_info,
@@ -394,7 +437,7 @@ where
             decision_str,
             engine_type,
             &reason,
-            graphql_info.as_ref(),
+            &protocol_summary,
         );
 
         let _ = &eval_target;
@@ -472,7 +515,7 @@ fn emit_l7_request_log(
     decision_str: &str,
     engine_type: &str,
     reason: &str,
-    graphql_info: Option<&crate::l7::graphql::GraphqlRequestInfo>,
+    protocol_summary: &str,
 ) {
     let (action_id, disposition_id, severity) = match decision_str {
         "deny" => (ActionId::Denied, DispositionId::Blocked, SeverityId::Medium),
@@ -487,9 +530,6 @@ fn emit_l7_request_log(
             SeverityId::Informational,
         ),
     };
-    let summary = graphql_info
-        .map(|info| format!(" {}", graphql_log_summary(info)))
-        .unwrap_or_default();
     let event = HttpActivityBuilder::new(openshell_ocsf::ctx::ctx())
         .activity(ActivityId::Other)
         .action(action_id)
@@ -503,11 +543,31 @@ fn emit_l7_request_log(
         .firewall_rule(&ctx.policy_name, engine_type)
         .message(format!(
             "L7_REQUEST {decision_str} {} {}:{}{}{} reason={}",
-            request_info.action, ctx.host, ctx.port, redacted_target, summary, reason,
+            request_info.action, ctx.host, ctx.port, redacted_target, protocol_summary, reason,
         ))
         .build();
     ocsf_emit!(event);
     emit_activity(ctx, decision_str == "deny", "l7_policy");
+}
+
+fn l7_protocol_log_summary(
+    graphql_info: Option<&crate::l7::graphql::GraphqlRequestInfo>,
+    jsonrpc_info: Option<&crate::l7::jsonrpc::JsonRpcRequestInfo>,
+) -> String {
+    if let Some(info) = graphql_info {
+        return format!(" {}", graphql_log_summary(info));
+    }
+
+    if let Some(info) = jsonrpc_info {
+        return format!(
+            " rpc_methods={} params_sha256={}",
+            jsonrpc_methods_for_log(info),
+            info.params_sha256()
+                .unwrap_or_else(|| "<empty>".to_string())
+        );
+    }
+
+    String::new()
 }
 
 fn emit_activity(ctx: &L7EvalContext, denied: bool, deny_group: &'static str) {
@@ -657,6 +717,20 @@ pub(crate) fn websocket_extension_mode(config: &L7EndpointConfig) -> WebSocketEx
         WebSocketExtensionMode::PermessageDeflate
     } else {
         WebSocketExtensionMode::Preserve
+    }
+}
+
+fn jsonrpc_inspection_mode(protocol: L7Protocol) -> crate::l7::jsonrpc::JsonRpcInspectionMode {
+    match protocol {
+        L7Protocol::Mcp => crate::l7::jsonrpc::JsonRpcInspectionMode::Mcp,
+        _ => crate::l7::jsonrpc::JsonRpcInspectionMode::JsonRpc,
+    }
+}
+
+fn jsonrpc_engine_type(protocol: L7Protocol) -> &'static str {
+    match protocol {
+        L7Protocol::Mcp => "l7-mcp",
+        _ => "l7-jsonrpc",
     }
 }
 
@@ -957,6 +1031,7 @@ where
                 allow_encoded_slash: config.allow_encoded_slash,
                 ..Default::default()
             },
+            jsonrpc_inspection_mode(config.protocol),
         )
         .await
         {
@@ -973,7 +1048,7 @@ where
                 } else {
                     let detail =
                         parse_rejection_detail(&e.to_string(), ParseRejectionMode::L7Endpoint);
-                    emit_parse_rejection(ctx, &detail, "l7-jsonrpc");
+                    emit_parse_rejection(ctx, &detail, jsonrpc_engine_type(config.protocol));
                 }
                 return Ok(());
             }
@@ -1049,7 +1124,7 @@ where
                     OcsfUrl::new("http", &ctx.host, &redacted_target, ctx.port),
                 ))
                 .dst_endpoint(Endpoint::from_domain(&ctx.host, ctx.port))
-                .firewall_rule(&ctx.policy_name, "l7-jsonrpc")
+                .firewall_rule(&ctx.policy_name, jsonrpc_engine_type(config.protocol))
                 .message(jsonrpc_log_message(
                     decision_str,
                     &request_info.action,
@@ -1357,9 +1432,16 @@ pub(crate) fn rule_method_names_for_log(info: &crate::l7::jsonrpc::JsonRpcReques
     }
     info.calls
         .iter()
-        .map(|call| call.method.as_str())
+        .map(|call| sanitize_log_token(&call.method))
         .collect::<Vec<_>>()
         .join(",")
+}
+
+fn sanitize_log_token(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| if ch.is_control() { '?' } else { ch })
+        .collect()
 }
 
 struct JsonRpcEvaluation {

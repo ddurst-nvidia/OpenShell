@@ -743,6 +743,7 @@ fn preprocess_yaml_data(yaml_str: &str) -> Result<String> {
 
     // Normalize port → ports for all endpoints so Rego always sees "ports" array.
     normalize_endpoint_ports(&mut data);
+    normalize_l7_policy_aliases(&mut data);
 
     // Validate BEFORE expanding presets (catches user errors like rules+access)
     let (errors, warnings) = crate::l7::validate_l7_policies(&data);
@@ -817,6 +818,143 @@ fn normalize_endpoint_ports(data: &mut serde_json::Value) {
             ep_obj.remove("port");
         }
     }
+}
+
+fn normalize_l7_policy_aliases(data: &mut serde_json::Value) {
+    let Some(policies) = data
+        .get_mut("network_policies")
+        .and_then(|v| v.as_object_mut())
+    else {
+        return;
+    };
+
+    for (_name, policy) in policies.iter_mut() {
+        let Some(endpoints) = policy.get_mut("endpoints").and_then(|v| v.as_array_mut()) else {
+            continue;
+        };
+
+        for ep in endpoints.iter_mut() {
+            let Some(ep_obj) = ep.as_object_mut() else {
+                continue;
+            };
+            normalize_jsonrpc_config_alias(ep_obj, "json_rpc");
+            normalize_jsonrpc_config_alias(ep_obj, "mcp");
+            normalize_l7_rules_aliases(ep_obj);
+        }
+    }
+}
+
+fn normalize_jsonrpc_config_alias(ep: &mut serde_json::Map<String, serde_json::Value>, key: &str) {
+    let Some(config) = ep.remove(key) else {
+        return;
+    };
+    let Some(max_body_bytes) = config
+        .as_object()
+        .and_then(|obj| obj.get("max_body_bytes"))
+        .and_then(serde_json::Value::as_u64)
+    else {
+        return;
+    };
+    ep.entry("json_rpc_max_body_bytes".to_string())
+        .or_insert_with(|| serde_json::json!(max_body_bytes));
+}
+
+fn normalize_l7_rules_aliases(ep: &mut serde_json::Map<String, serde_json::Value>) {
+    let protocol = ep
+        .get("protocol")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if let Some(rules) = ep.get_mut("rules").and_then(|v| v.as_array_mut()) {
+        for rule in rules {
+            if let Some(allow) = rule
+                .get_mut("allow")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                normalize_l7_rule_aliases(allow, &protocol);
+            } else if let Some(allow) = rule.as_object_mut() {
+                normalize_l7_rule_aliases(allow, &protocol);
+            }
+        }
+    }
+
+    if let Some(denies) = ep.get_mut("deny_rules").and_then(|v| v.as_array_mut()) {
+        for deny in denies {
+            if let Some(deny_obj) = deny.as_object_mut() {
+                normalize_l7_rule_aliases(deny_obj, &protocol);
+            }
+        }
+    }
+}
+
+fn normalize_l7_rule_aliases(
+    rule: &mut serde_json::Map<String, serde_json::Value>,
+    protocol: &str,
+) {
+    if protocol == "mcp"
+        && let Some(method) = rule.remove("method")
+        && rule
+            .get("rpc_method")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .is_empty()
+    {
+        rule.insert("rpc_method".to_string(), method);
+    }
+
+    if let Some(tool) = rule.remove("tool")
+        && let Some(tool_name) = tool.as_str().filter(|s| !s.is_empty())
+    {
+        let params = rule
+            .entry("params".to_string())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if let Some(params) = params.as_object_mut() {
+            params
+                .entry("name".to_string())
+                .or_insert_with(|| serde_json::Value::String(tool_name.to_string()));
+        }
+    }
+
+    normalize_jsonrpc_params(rule);
+}
+
+fn normalize_jsonrpc_params(rule: &mut serde_json::Map<String, serde_json::Value>) {
+    let Some(params) = rule
+        .get_mut("params")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+
+    let mut flattened = serde_json::Map::new();
+    for (key, matcher) in std::mem::take(params) {
+        flatten_jsonrpc_param_matcher(&key, matcher, &mut flattened);
+    }
+    *params = flattened;
+}
+
+fn flatten_jsonrpc_param_matcher(
+    key: &str,
+    matcher: serde_json::Value,
+    out: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    let serde_json::Value::Object(children) = matcher else {
+        out.insert(key.to_string(), matcher);
+        return;
+    };
+
+    if is_jsonrpc_matcher_object(&children) || children.is_empty() {
+        out.insert(key.to_string(), serde_json::Value::Object(children));
+        return;
+    }
+
+    for (child_key, child) in children {
+        flatten_jsonrpc_param_matcher(&format!("{key}.{child_key}"), child, out);
+    }
+}
+
+fn is_jsonrpc_matcher_object(obj: &serde_json::Map<String, serde_json::Value>) -> bool {
+    obj.contains_key("any") || obj.contains_key("glob")
 }
 
 /// Resolve a policy binary path through the container's root filesystem.
@@ -1061,6 +1199,7 @@ fn proto_to_opa_data_json(proto: &ProtoSandboxPolicy, entrypoint_pid: u32) -> St
                                     "command": a.map_or("", |a| &a.command),
                                     "operation_type": a.map_or("", |a| &a.operation_type),
                                     "operation_name": a.map_or("", |a| &a.operation_name),
+                                    "rpc_method": a.map_or("", |a| &a.rpc_method),
                                 });
                                 if let Some(a) = a
                                     && !a.fields.is_empty()
@@ -1113,6 +1252,9 @@ fn proto_to_opa_data_json(proto: &ProtoSandboxPolicy, entrypoint_pid: u32) -> St
                                 }
                                 if !d.fields.is_empty() {
                                     deny["fields"] = d.fields.clone().into();
+                                }
+                                if !d.rpc_method.is_empty() {
+                                    deny["rpc_method"] = d.rpc_method.clone().into();
                                 }
                                 let query = l7_matchers_to_json(&d.query);
                                 if !query.is_empty() {
@@ -3005,6 +3147,124 @@ network_policies:
             }),
         );
         assert!(!eval_l7(&engine, &blocked_with_args));
+    }
+
+    #[test]
+    fn l7_mcp_rules_filter_tools_call() {
+        let data = r#"
+network_policies:
+  mcp_params:
+    name: mcp_params
+    endpoints:
+      - host: mcp.params.test
+        port: 8000
+        path: /mcp
+        protocol: mcp
+        enforcement: enforce
+        mcp:
+          max_body_bytes: 131072
+        rules:
+          - allow:
+              method: initialize
+          - allow:
+              method: tools/list
+          - allow:
+              method: tools/call
+              tool: read_status
+        deny_rules:
+          - method: tools/call
+            tool: blocked_action
+    binaries:
+      - { path: /usr/bin/curl }
+"#;
+        let engine = OpaEngine::from_strings(TEST_POLICY, data).expect("engine from yaml");
+
+        let read_status = l7_jsonrpc_input_with_params(
+            "mcp.params.test",
+            8000,
+            "/mcp",
+            "tools/call",
+            serde_json::json!({"name": "read_status"}),
+        );
+        assert!(eval_l7(&engine, &read_status));
+
+        let blocked = l7_jsonrpc_input_with_params(
+            "mcp.params.test",
+            8000,
+            "/mcp",
+            "tools/call",
+            serde_json::json!({"name": "blocked_action"}),
+        );
+        assert!(!eval_l7(&engine, &blocked));
+    }
+
+    #[test]
+    fn l7_jsonrpc_null_metadata_non_matches_without_opa_error() {
+        let data = r#"
+network_policies:
+  jsonrpc_null:
+    name: jsonrpc_null
+    endpoints:
+      - host: mcp.null.test
+        port: 8000
+        path: /mcp
+        protocol: json-rpc
+        enforcement: enforce
+        rules:
+          - allow:
+              rpc_method: tools/list
+    binaries:
+      - { path: /usr/bin/curl }
+"#;
+        let engine = OpaEngine::from_strings(TEST_POLICY, data).expect("engine from yaml");
+        let input = serde_json::json!({
+            "network": { "host": "mcp.null.test", "port": 8000 },
+            "exec": {
+                "path": "/usr/bin/curl",
+                "ancestors": [],
+                "cmdline_paths": []
+            },
+            "request": {
+                "method": "POST",
+                "path": "/mcp",
+                "query_params": {},
+                "jsonrpc": null
+            }
+        });
+
+        assert!(!eval_l7(&engine, &input));
+    }
+
+    #[test]
+    fn l7_jsonrpc_params_matcher_validation_rejects_invalid_shape() {
+        let data = r#"
+network_policies:
+  invalid_jsonrpc_params:
+    name: invalid_jsonrpc_params
+    endpoints:
+      - host: mcp.invalid.test
+        port: 8000
+        path: /mcp
+        protocol: json-rpc
+        enforcement: enforce
+        rules:
+          - allow:
+              rpc_method: tools/call
+              params:
+                name:
+                  any: []
+    binaries:
+      - { path: /usr/bin/curl }
+"#;
+        let Err(err) = OpaEngine::from_strings(TEST_POLICY, data) else {
+            panic!("invalid params matcher should fail validation");
+        };
+
+        assert!(
+            err.to_string()
+                .contains("params.name.any: list must not be empty"),
+            "unexpected validation error: {err}"
+        );
     }
 
     #[test]

@@ -99,7 +99,17 @@ SANDBOX_COMMAND=(
   --timeout "${CLIENT_TIMEOUT_SECONDS}"
   "${ENV_ARGS[@]}"
   --
-  sh -c 'cd /opt/mcp-conformance && exec ./node_modules/.bin/tsx examples/clients/typescript/everything-client.ts "$1"'
+  sh -c '
+    cd /opt/mcp-conformance
+    # Keep canonical runner scenario names in the environment. The wrapper only
+    # swaps client entrypoints for upstream reference-client fixture drift.
+    case "${MCP_CONFORMANCE_SCENARIO:-}" in
+      tools_call|tools-call) client=examples/clients/typescript/test2.ts ;;
+      sse-retry) client=examples/clients/typescript/sse-retry-test.ts ;;
+      *) client=examples/clients/typescript/everything-client.ts ;;
+    esac
+    exec ./node_modules/.bin/tsx "$client" "$1"
+  ' \
   sh "${CLIENT_SERVER_URL}"
 )
 

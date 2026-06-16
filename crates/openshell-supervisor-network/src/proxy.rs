@@ -3585,7 +3585,7 @@ async fn handle_forward_proxy(
         } else {
             None
         };
-        let jsonrpc = if l7_config.config.protocol == crate::l7::L7Protocol::JsonRpc {
+        let jsonrpc = if l7_config.config.protocol.is_jsonrpc_family() {
             let header_end = forward_request_bytes
                 .windows(4)
                 .position(|w| w == b"\r\n\r\n")
@@ -3636,7 +3636,15 @@ async fn handle_forward_proxy(
                     }
                 };
                 forward_request_bytes = jsonrpc_request.raw_header;
-                Some(crate::l7::jsonrpc::parse_jsonrpc_body(&body))
+                Some(crate::l7::jsonrpc::parse_jsonrpc_body_with_mode(
+                    &body,
+                    match l7_config.config.protocol {
+                        crate::l7::L7Protocol::Mcp => {
+                            crate::l7::jsonrpc::JsonRpcInspectionMode::Mcp
+                        }
+                        _ => crate::l7::jsonrpc::JsonRpcInspectionMode::JsonRpc,
+                    },
+                ))
             }
         } else {
             None
@@ -3693,6 +3701,7 @@ async fn handle_forward_proxy(
             let engine_type = match l7_config.config.protocol {
                 crate::l7::L7Protocol::Graphql => "l7-graphql",
                 crate::l7::L7Protocol::JsonRpc => "l7-jsonrpc",
+                crate::l7::L7Protocol::Mcp => "l7-mcp",
                 _ => "l7",
             };
             let log_message = request_info.jsonrpc.as_ref().map_or_else(
