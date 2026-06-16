@@ -659,15 +659,21 @@ query_value_matches(value, matcher) if {
 # JSON-RPC method and params matching. The sandbox flattens object params into
 # dot-separated keys before policy evaluation, e.g. arguments.scope.
 jsonrpc_rule_matches(request, rule) if {
-	jsonrpc := object.get(request, "jsonrpc", {})
-	method := object.get(jsonrpc, "method", null)
-	method != null
-	glob.match(rule.rpc_method, [], method)
+	jsonrpc := object.get(request, "jsonrpc", null)
+	is_object(jsonrpc)
+	method := object.get(jsonrpc, "method", "")
+	is_string(method)
+	method != ""
+	rpc_method := object.get(rule, "rpc_method", "")
+	is_string(rpc_method)
+	rpc_method != ""
+	glob.match(rpc_method, [], method)
 	jsonrpc_params_match(jsonrpc, rule)
 }
 
 jsonrpc_params_match(jsonrpc, rule) if {
 	param_rules := object.get(rule, "params", {})
+	is_object(param_rules)
 	not jsonrpc_param_mismatch(jsonrpc, param_rules)
 }
 
@@ -679,6 +685,7 @@ jsonrpc_param_mismatch(jsonrpc, param_rules) if {
 
 jsonrpc_param_key_matches(jsonrpc, key, matcher) if {
 	params := object.get(jsonrpc, "params", {})
+	is_object(params)
 	value := object.get(params, key, null)
 	value != null
 	is_string(value)

@@ -13,6 +13,12 @@ use crate::l7::provider::{L7Provider, L7Request};
 
 pub const DEFAULT_MAX_BODY_BYTES: usize = 64 * 1024;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JsonRpcInspectionMode {
+    JsonRpc,
+    Mcp,
+}
+
 pub struct JsonRpcHttpRequest {
     pub request: L7Request,
     pub info: JsonRpcRequestInfo,
@@ -22,6 +28,7 @@ pub(crate) async fn parse_jsonrpc_http_request<C: AsyncRead + AsyncWrite + Unpin
     client: &mut C,
     max_body_bytes: usize,
     canonicalize_options: crate::l7::path::CanonicalizeOptions,
+    inspection_mode: JsonRpcInspectionMode,
 ) -> Result<Option<JsonRpcHttpRequest>> {
     let provider = crate::l7::rest::RestProvider::with_options(canonicalize_options);
     let Some(mut request) = provider.parse_request(client).await? else {
@@ -29,7 +36,7 @@ pub(crate) async fn parse_jsonrpc_http_request<C: AsyncRead + AsyncWrite + Unpin
     };
     let body =
         crate::l7::http::read_body_for_inspection(client, &mut request, max_body_bytes).await?;
-    let info = parse_jsonrpc_body(&body);
+    let info = parse_jsonrpc_body_with_mode(&body, inspection_mode);
     Ok(Some(JsonRpcHttpRequest { request, info }))
 }
 
@@ -44,6 +51,7 @@ pub struct JsonRpcRequestInfo {
 pub struct JsonRpcCallInfo {
     pub method: String,
     pub params: HashMap<String, String>,
+    pub tool: Option<String>,
 }
 
 impl JsonRpcRequestInfo {
@@ -72,6 +80,17 @@ impl JsonRpcRequestInfo {
 /// Returns an info struct with `method` set on success, or `error` set if the
 /// body is not valid JSON-RPC 2.0.
 pub fn parse_jsonrpc_body(body: &[u8]) -> JsonRpcRequestInfo {
+    parse_jsonrpc_body_with_mode(body, JsonRpcInspectionMode::JsonRpc)
+}
+
+pub fn parse_mcp_body(body: &[u8]) -> JsonRpcRequestInfo {
+    parse_jsonrpc_body_with_mode(body, JsonRpcInspectionMode::Mcp)
+}
+
+pub fn parse_jsonrpc_body_with_mode(
+    body: &[u8],
+    inspection_mode: JsonRpcInspectionMode,
+) -> JsonRpcRequestInfo {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
         return JsonRpcRequestInfo {
             calls: Vec::new(),
@@ -90,7 +109,7 @@ pub fn parse_jsonrpc_body(body: &[u8]) -> JsonRpcRequestInfo {
         }
         let mut calls = Vec::new();
         for item in &items {
-            let call = match parse_jsonrpc_call(item) {
+            let call = match parse_jsonrpc_call(item, inspection_mode) {
                 Ok(call) => call,
                 Err(error) => {
                     return JsonRpcRequestInfo {
@@ -109,7 +128,7 @@ pub fn parse_jsonrpc_body(body: &[u8]) -> JsonRpcRequestInfo {
         };
     }
 
-    let call = match parse_jsonrpc_call(&value) {
+    let call = match parse_jsonrpc_call(&value, inspection_mode) {
         Ok(call) => call,
         Err(error) => {
             return JsonRpcRequestInfo {
@@ -126,7 +145,10 @@ pub fn parse_jsonrpc_body(body: &[u8]) -> JsonRpcRequestInfo {
     }
 }
 
-fn parse_jsonrpc_call(value: &serde_json::Value) -> std::result::Result<JsonRpcCallInfo, String> {
+fn parse_jsonrpc_call(
+    value: &serde_json::Value,
+    inspection_mode: JsonRpcInspectionMode,
+) -> std::result::Result<JsonRpcCallInfo, String> {
     let version = value
         .get("jsonrpc")
         .and_then(|v| v.as_str())
@@ -141,10 +163,35 @@ fn parse_jsonrpc_call(value: &serde_json::Value) -> std::result::Result<JsonRpcC
     let params = value
         .get("params")
         .map_or_else(|| Ok(HashMap::new()), flatten_jsonrpc_params)?;
+    let tool = params.get("name").cloned();
+    if inspection_mode == JsonRpcInspectionMode::Mcp {
+        validate_mcp_call(value)?;
+    }
     Ok(JsonRpcCallInfo {
         method: method.to_string(),
         params,
+        tool,
     })
+}
+
+fn validate_mcp_call(value: &serde_json::Value) -> std::result::Result<(), String> {
+    if value.get("id").is_some() {
+        let request: tower_mcp_types::protocol::JsonRpcRequest =
+            serde_json::from_value(value.clone())
+                .map_err(|error| format!("invalid MCP request: {error}"))?;
+        request
+            .validate()
+            .map_err(|error| format!("invalid MCP request: {error:?}"))?;
+        tower_mcp_types::protocol::McpRequest::from_jsonrpc(&request)
+            .map_err(|error| format!("invalid MCP request params: {error}"))?;
+    } else {
+        let notification: tower_mcp_types::protocol::JsonRpcNotification =
+            serde_json::from_value(value.clone())
+                .map_err(|error| format!("invalid MCP notification: {error}"))?;
+        tower_mcp_types::protocol::McpNotification::from_jsonrpc(&notification)
+            .map_err(|error| format!("invalid MCP notification params: {error}"))?;
+    }
+    Ok(())
 }
 
 fn flatten_jsonrpc_params(
@@ -242,6 +289,51 @@ mod tests {
         assert_eq!(
             params.get("arguments.scope").map(String::as_str),
             Some("workspace/main")
+        );
+    }
+
+    #[test]
+    fn mcp_mode_validates_known_methods_and_extracts_tool() {
+        let body = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_web","arguments":{"query":"openshell"}}}"#;
+        let info = parse_mcp_body(body);
+
+        assert!(info.error.is_none(), "expected valid MCP call: {info:?}");
+        let call = info.calls.first().expect("single MCP call");
+        assert_eq!(call.method, "tools/call");
+        assert_eq!(call.tool.as_deref(), Some("search_web"));
+        assert_eq!(
+            call.params.get("arguments.query").map(String::as_str),
+            Some("openshell")
+        );
+    }
+
+    #[test]
+    fn mcp_mode_rejects_invalid_known_method_params() {
+        let body = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"arguments":{"query":"openshell"}}}"#;
+        let info = parse_mcp_body(body);
+
+        assert!(info.calls.is_empty());
+        assert!(
+            info.error
+                .as_deref()
+                .is_some_and(|error| error.contains("invalid MCP request params")),
+            "expected MCP params validation error, got {info:?}"
+        );
+    }
+
+    #[test]
+    fn mcp_mode_allows_unknown_extension_methods() {
+        let body =
+            br#"{"jsonrpc":"2.0","id":1,"method":"vendor/extension","params":{"name":"custom"}}"#;
+        let info = parse_mcp_body(body);
+
+        assert!(
+            info.error.is_none(),
+            "extension method should remain addressable"
+        );
+        assert_eq!(
+            info.calls.first().map(|call| call.method.as_str()),
+            Some("vendor/extension")
         );
     }
 

@@ -87,7 +87,13 @@ ENV_ARGS=()
 # scenario and read scenario-specific context.
 for NAME in MCP_CONFORMANCE_SCENARIO MCP_CONFORMANCE_CONTEXT MCP_CONFORMANCE_PROTOCOL_VERSION; do
   if [ -n "${!NAME+x}" ]; then
-    ENV_ARGS+=(--env "${NAME}=${!NAME}")
+    VALUE="${!NAME}"
+    # v0.1.16 exposes the runner scenario as tools_call, but the bundled
+    # everything-client handler is registered as tools-call.
+    if [ "${NAME}" = "MCP_CONFORMANCE_SCENARIO" ] && [ "${VALUE}" = "tools_call" ]; then
+      VALUE="tools-call"
+    fi
+    ENV_ARGS+=(--env "${NAME}=${VALUE}")
   fi
 done
 
@@ -104,5 +110,14 @@ export OPENSHELL_E2E_DOCKER_SANDBOX_IMAGE="${OPENSHELL_E2E_DOCKER_SANDBOX_IMAGE:
   --policy "${POLICY_FILE}" \
   "${ENV_ARGS[@]}" \
   -- \
-  sh -c 'cd /opt/mcp-conformance && exec ./node_modules/.bin/tsx examples/clients/typescript/everything-client.ts "$1"' \
+  sh -c '
+    cd /opt/mcp-conformance
+    # The v0.1.16 everything client only lists tools for this scenario;
+    # test2.ts is the bundled client that calls add_numbers.
+    case "${MCP_CONFORMANCE_SCENARIO:-}" in
+      tools_call|tools-call) client=examples/clients/typescript/test2.ts ;;
+      *) client=examples/clients/typescript/everything-client.ts ;;
+    esac
+    exec ./node_modules/.bin/tsx "$client" "$1"
+  ' \
   sh "${CLIENT_SERVER_URL}"

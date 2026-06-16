@@ -108,8 +108,8 @@ struct NetworkEndpointDef {
     enforcement: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     access: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    rules: Vec<L7RuleDef>,
+    #[serde(default, skip_serializing_if = "RulesDef::is_empty")]
+    rules: RulesDef,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     allowed_ips: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -137,6 +137,8 @@ struct NetworkEndpointDef {
     graphql_max_body_bytes: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     json_rpc: Option<JsonRpcConfigDef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mcp: Option<McpConfigDef>,
 }
 
 // Signature dictated by serde's `skip_serializing_if`, which requires `&T`.
@@ -164,6 +166,17 @@ fn json_rpc_config_from_proto(max_body_bytes: u32) -> Option<JsonRpcConfigDef> {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct McpConfigDef {
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    max_body_bytes: u32,
+}
+
+fn mcp_config_from_proto(max_body_bytes: u32) -> Option<McpConfigDef> {
+    (max_body_bytes > 0).then_some(McpConfigDef { max_body_bytes })
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GraphqlOperationDef {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     operation_type: String,
@@ -177,6 +190,51 @@ struct GraphqlOperationDef {
 #[serde(deny_unknown_fields)]
 struct L7RuleDef {
     allow: L7AllowDef,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum RulesDef {
+    Legacy(Vec<L7RuleDef>),
+    Grouped(L7RuleGroupsDef),
+}
+
+impl Default for RulesDef {
+    fn default() -> Self {
+        Self::Legacy(Vec::new())
+    }
+}
+
+impl RulesDef {
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Legacy(rules) => rules.is_empty(),
+            Self::Grouped(groups) => groups.allow.is_empty() && groups.deny.is_empty(),
+        }
+    }
+
+    fn into_parts(self) -> (Vec<L7RuleDef>, Vec<L7DenyRuleDef>) {
+        match self {
+            Self::Legacy(rules) => (rules, Vec::new()),
+            Self::Grouped(groups) => (
+                groups
+                    .allow
+                    .into_iter()
+                    .map(|allow| L7RuleDef { allow })
+                    .collect(),
+                groups.deny,
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct L7RuleGroupsDef {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    allow: Vec<L7AllowDef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    deny: Vec<L7DenyRuleDef>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -198,6 +256,10 @@ struct L7AllowDef {
     fields: Vec<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     rpc_method: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    mcp_method: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    tool: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     params: BTreeMap<String, QueryMatcherDef>,
 }
@@ -235,6 +297,10 @@ struct L7DenyRuleDef {
     fields: Vec<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     rpc_method: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    mcp_method: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    tool: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     params: BTreeMap<String, QueryMatcherDef>,
 }
@@ -271,6 +337,165 @@ fn matcher_proto_to_def(matcher: L7QueryMatcher) -> QueryMatcherDef {
     }
 }
 
+fn matcher_glob(glob: String) -> QueryMatcherDef {
+    QueryMatcherDef::Glob(glob)
+}
+
+fn method_from_aliases(rpc_method: String, mcp_method: String) -> String {
+    if mcp_method.is_empty() {
+        rpc_method
+    } else {
+        mcp_method
+    }
+}
+
+fn params_with_tool(
+    mut params: BTreeMap<String, QueryMatcherDef>,
+    tool: String,
+) -> BTreeMap<String, QueryMatcherDef> {
+    if !tool.is_empty() {
+        params
+            .entry("name".to_string())
+            .or_insert_with(|| matcher_glob(tool));
+    }
+    params
+}
+
+fn allow_def_to_proto(allow: L7AllowDef) -> L7Allow {
+    L7Allow {
+        method: allow.method,
+        path: allow.path,
+        command: allow.command,
+        operation_type: allow.operation_type,
+        operation_name: allow.operation_name,
+        fields: allow.fields,
+        rpc_method: method_from_aliases(allow.rpc_method, allow.mcp_method),
+        query: allow
+            .query
+            .into_iter()
+            .map(|(key, matcher)| (key, matcher_def_to_proto(matcher)))
+            .collect(),
+        params: params_with_tool(allow.params, allow.tool)
+            .into_iter()
+            .map(|(key, matcher)| (key, matcher_def_to_proto(matcher)))
+            .collect(),
+    }
+}
+
+fn deny_def_to_proto(deny: L7DenyRuleDef) -> L7DenyRule {
+    L7DenyRule {
+        method: deny.method,
+        path: deny.path,
+        command: deny.command,
+        operation_type: deny.operation_type,
+        operation_name: deny.operation_name,
+        fields: deny.fields,
+        rpc_method: method_from_aliases(deny.rpc_method, deny.mcp_method),
+        query: deny
+            .query
+            .into_iter()
+            .map(|(key, matcher)| (key, matcher_def_to_proto(matcher)))
+            .collect(),
+        params: params_with_tool(deny.params, deny.tool)
+            .into_iter()
+            .map(|(key, matcher)| (key, matcher_def_to_proto(matcher)))
+            .collect(),
+    }
+}
+
+fn json_rpc_max_body_bytes(json_rpc: &Option<JsonRpcConfigDef>, mcp: &Option<McpConfigDef>) -> u32 {
+    mcp.as_ref().map_or_else(
+        || json_rpc.as_ref().map_or(0, |config| config.max_body_bytes),
+        |config| config.max_body_bytes,
+    )
+}
+
+fn is_mcp_protocol(protocol: &str) -> bool {
+    protocol.eq_ignore_ascii_case("mcp")
+}
+
+fn split_tool_param(
+    protocol: &str,
+    params: BTreeMap<String, QueryMatcherDef>,
+) -> (String, BTreeMap<String, QueryMatcherDef>) {
+    if !is_mcp_protocol(protocol) {
+        return (String::new(), params);
+    }
+
+    let mut params = params;
+    let tool = match params.remove("name") {
+        Some(QueryMatcherDef::Glob(glob)) => glob,
+        Some(other) => {
+            params.insert("name".to_string(), other);
+            String::new()
+        }
+        None => String::new(),
+    };
+    (tool, params)
+}
+
+fn allow_proto_to_def(protocol: &str, allow: L7Allow) -> L7AllowDef {
+    let params: BTreeMap<String, QueryMatcherDef> = allow
+        .params
+        .into_iter()
+        .map(|(key, matcher)| (key, matcher_proto_to_def(matcher)))
+        .collect();
+    let (tool, params) = split_tool_param(protocol, params);
+    let (rpc_method, mcp_method) = if is_mcp_protocol(protocol) {
+        (String::new(), allow.rpc_method)
+    } else {
+        (allow.rpc_method, String::new())
+    };
+    L7AllowDef {
+        method: allow.method,
+        path: allow.path,
+        command: allow.command,
+        query: allow
+            .query
+            .into_iter()
+            .map(|(key, matcher)| (key, matcher_proto_to_def(matcher)))
+            .collect(),
+        operation_type: allow.operation_type,
+        operation_name: allow.operation_name,
+        fields: allow.fields,
+        rpc_method,
+        mcp_method,
+        tool,
+        params,
+    }
+}
+
+fn deny_proto_to_def(protocol: &str, deny: &L7DenyRule) -> L7DenyRuleDef {
+    let params: BTreeMap<String, QueryMatcherDef> = deny
+        .params
+        .iter()
+        .map(|(key, matcher)| (key.clone(), matcher_proto_to_def(matcher.clone())))
+        .collect();
+    let (tool, params) = split_tool_param(protocol, params);
+    let (rpc_method, mcp_method) = if is_mcp_protocol(protocol) {
+        (String::new(), deny.rpc_method.clone())
+    } else {
+        (deny.rpc_method.clone(), String::new())
+    };
+    L7DenyRuleDef {
+        method: deny.method.clone(),
+        path: deny.path.clone(),
+        command: deny.command.clone(),
+        query: deny
+            .query
+            .iter()
+            .map(|(key, matcher)| (key.clone(), matcher_proto_to_def(matcher.clone())))
+            .collect(),
+        operation_type: deny.operation_type.clone(),
+        operation_name: deny.operation_name.clone(),
+        fields: deny.fields.clone(),
+        rpc_method,
+        mcp_method,
+        tool,
+        params,
+    }
+}
+
 fn to_proto(raw: PolicyFile) -> SandboxPolicy {
     let network_policies = raw
         .network_policies
@@ -286,6 +511,9 @@ fn to_proto(raw: PolicyFile) -> SandboxPolicy {
                     .endpoints
                     .into_iter()
                     .map(|e| {
+                        let (allow_rules, grouped_deny_rules) = e.rules.into_parts();
+                        let mut deny_rules = grouped_deny_rules;
+                        deny_rules.extend(e.deny_rules);
                         // Normalize port/ports: ports takes precedence, else
                         // single port is promoted to ports array.
                         let normalized_ports: Vec<u32> = if !e.ports.is_empty() {
@@ -304,61 +532,14 @@ fn to_proto(raw: PolicyFile) -> SandboxPolicy {
                             tls: e.tls,
                             enforcement: e.enforcement,
                             access: e.access,
-                            rules: e
-                                .rules
+                            rules: allow_rules
                                 .into_iter()
                                 .map(|r| L7Rule {
-                                    allow: Some(L7Allow {
-                                        method: r.allow.method,
-                                        path: r.allow.path,
-                                        command: r.allow.command,
-                                        operation_type: r.allow.operation_type,
-                                        operation_name: r.allow.operation_name,
-                                        fields: r.allow.fields,
-                                        rpc_method: r.allow.rpc_method,
-                                        query: r
-                                            .allow
-                                            .query
-                                            .into_iter()
-                                            .map(|(key, matcher)| {
-                                                (key, matcher_def_to_proto(matcher))
-                                            })
-                                            .collect(),
-                                        params: r
-                                            .allow
-                                            .params
-                                            .into_iter()
-                                            .map(|(key, matcher)| {
-                                                (key, matcher_def_to_proto(matcher))
-                                            })
-                                            .collect(),
-                                    }),
+                                    allow: Some(allow_def_to_proto(r.allow)),
                                 })
                                 .collect(),
                             allowed_ips: e.allowed_ips,
-                            deny_rules: e
-                                .deny_rules
-                                .into_iter()
-                                .map(|d| L7DenyRule {
-                                    method: d.method,
-                                    path: d.path,
-                                    command: d.command,
-                                    operation_type: d.operation_type,
-                                    operation_name: d.operation_name,
-                                    fields: d.fields,
-                                    rpc_method: d.rpc_method,
-                                    query: d
-                                        .query
-                                        .into_iter()
-                                        .map(|(key, matcher)| (key, matcher_def_to_proto(matcher)))
-                                        .collect(),
-                                    params: d
-                                        .params
-                                        .into_iter()
-                                        .map(|(key, matcher)| (key, matcher_def_to_proto(matcher)))
-                                        .collect(),
-                                })
-                                .collect(),
+                            deny_rules: deny_rules.into_iter().map(deny_def_to_proto).collect(),
                             allow_encoded_slash: e.allow_encoded_slash,
                             websocket_credential_rewrite: e.websocket_credential_rewrite,
                             request_body_credential_rewrite: e.request_body_credential_rewrite,
@@ -381,10 +562,7 @@ fn to_proto(raw: PolicyFile) -> SandboxPolicy {
                                 })
                                 .collect(),
                             graphql_max_body_bytes: e.graphql_max_body_bytes,
-                            json_rpc_max_body_bytes: e
-                                .json_rpc
-                                .as_ref()
-                                .map_or(0, |config| config.max_body_bytes),
+                            json_rpc_max_body_bytes: json_rpc_max_body_bytes(&e.json_rpc, &e.mcp),
                         }
                     })
                     .collect(),
@@ -464,75 +642,57 @@ fn from_proto(policy: &SandboxPolicy) -> PolicyFile {
                         } else {
                             (clamp(e.ports.first().copied().unwrap_or(e.port)), vec![])
                         };
+                        let protocol = e.protocol.clone();
+                        let allow_defs: Vec<L7AllowDef> = e
+                            .rules
+                            .iter()
+                            .map(|r| {
+                                allow_proto_to_def(&protocol, r.allow.clone().unwrap_or_default())
+                            })
+                            .collect();
+                        let deny_defs: Vec<L7DenyRuleDef> = e
+                            .deny_rules
+                            .iter()
+                            .map(|d| deny_proto_to_def(&protocol, d))
+                            .collect();
+                        let (rules, deny_rules) = if is_mcp_protocol(&protocol)
+                            && (!allow_defs.is_empty() || !deny_defs.is_empty())
+                        {
+                            (
+                                RulesDef::Grouped(L7RuleGroupsDef {
+                                    allow: allow_defs,
+                                    deny: deny_defs,
+                                }),
+                                Vec::new(),
+                            )
+                        } else {
+                            (
+                                RulesDef::Legacy(
+                                    allow_defs
+                                        .into_iter()
+                                        .map(|allow| L7RuleDef { allow })
+                                        .collect(),
+                                ),
+                                deny_defs,
+                            )
+                        };
+                        let (json_rpc, mcp) = if is_mcp_protocol(&protocol) {
+                            (None, mcp_config_from_proto(e.json_rpc_max_body_bytes))
+                        } else {
+                            (json_rpc_config_from_proto(e.json_rpc_max_body_bytes), None)
+                        };
                         NetworkEndpointDef {
                             host: e.host.clone(),
                             path: e.path.clone(),
                             port,
                             ports,
-                            protocol: e.protocol.clone(),
+                            protocol,
                             tls: e.tls.clone(),
                             enforcement: e.enforcement.clone(),
                             access: e.access.clone(),
-                            rules: e
-                                .rules
-                                .iter()
-                                .map(|r| {
-                                    let a = r.allow.clone().unwrap_or_default();
-                                    L7RuleDef {
-                                        allow: L7AllowDef {
-                                            method: a.method,
-                                            path: a.path,
-                                            command: a.command,
-                                            operation_type: a.operation_type,
-                                            operation_name: a.operation_name,
-                                            fields: a.fields,
-                                            rpc_method: a.rpc_method,
-                                            query: a
-                                                .query
-                                                .into_iter()
-                                                .map(|(key, matcher)| {
-                                                    (key, matcher_proto_to_def(matcher))
-                                                })
-                                                .collect(),
-                                            params: a
-                                                .params
-                                                .into_iter()
-                                                .map(|(key, matcher)| {
-                                                    (key, matcher_proto_to_def(matcher))
-                                                })
-                                                .collect(),
-                                        },
-                                    }
-                                })
-                                .collect(),
+                            rules,
                             allowed_ips: e.allowed_ips.clone(),
-                            deny_rules: e
-                                .deny_rules
-                                .iter()
-                                .map(|d| L7DenyRuleDef {
-                                    method: d.method.clone(),
-                                    path: d.path.clone(),
-                                    command: d.command.clone(),
-                                    operation_type: d.operation_type.clone(),
-                                    operation_name: d.operation_name.clone(),
-                                    fields: d.fields.clone(),
-                                    rpc_method: d.rpc_method.clone(),
-                                    query: d
-                                        .query
-                                        .iter()
-                                        .map(|(key, matcher)| {
-                                            (key.clone(), matcher_proto_to_def(matcher.clone()))
-                                        })
-                                        .collect(),
-                                    params: d
-                                        .params
-                                        .iter()
-                                        .map(|(key, matcher)| {
-                                            (key.clone(), matcher_proto_to_def(matcher.clone()))
-                                        })
-                                        .collect(),
-                                })
-                                .collect(),
+                            deny_rules,
                             allow_encoded_slash: e.allow_encoded_slash,
                             websocket_credential_rewrite: e.websocket_credential_rewrite,
                             request_body_credential_rewrite: e.request_body_credential_rewrite,
@@ -552,7 +712,8 @@ fn from_proto(policy: &SandboxPolicy) -> PolicyFile {
                                 })
                                 .collect(),
                             graphql_max_body_bytes: e.graphql_max_body_bytes,
-                            json_rpc: json_rpc_config_from_proto(e.json_rpc_max_body_bytes),
+                            json_rpc,
+                            mcp,
                         }
                     })
                     .collect(),
@@ -1767,6 +1928,90 @@ network_policies:
         let ep = &proto2.network_policies["mcp"].endpoints[0];
         assert_eq!(ep.protocol, "json-rpc");
         assert_eq!(ep.json_rpc_max_body_bytes, 131_072);
+    }
+
+    #[test]
+    fn parse_grouped_mcp_rules_to_jsonrpc_runtime_fields() {
+        let yaml = r"
+version: 1
+network_policies:
+  mcp:
+    name: mcp
+    endpoints:
+      - host: mcp.example.com
+        port: 443
+        path: /mcp
+        protocol: mcp
+        enforcement: enforce
+        mcp:
+          max_body_bytes: 131072
+        rules:
+          deny:
+            - mcp_method: tools/call
+              tool: send_email
+          allow:
+            - mcp_method: initialize
+            - mcp_method: tools/list
+            - mcp_method: tools/call
+              tool: search_web
+              params:
+                arguments.repository: NVIDIA/OpenShell
+    binaries:
+      - path: /usr/bin/curl
+";
+        let proto = parse_sandbox_policy(yaml).expect("parse failed");
+        let ep = &proto.network_policies["mcp"].endpoints[0];
+
+        assert_eq!(ep.protocol, "mcp");
+        assert_eq!(ep.json_rpc_max_body_bytes, 131_072);
+        assert_eq!(ep.rules.len(), 3);
+        assert_eq!(ep.rules[2].allow.as_ref().unwrap().rpc_method, "tools/call");
+        assert_eq!(
+            ep.rules[2].allow.as_ref().unwrap().params["name"].glob,
+            "search_web"
+        );
+        assert_eq!(
+            ep.rules[2].allow.as_ref().unwrap().params["arguments.repository"].glob,
+            "NVIDIA/OpenShell"
+        );
+        assert_eq!(ep.deny_rules.len(), 1);
+        assert_eq!(ep.deny_rules[0].rpc_method, "tools/call");
+        assert_eq!(ep.deny_rules[0].params["name"].glob, "send_email");
+    }
+
+    #[test]
+    fn round_trip_mcp_policy_serializes_mcp_expression() {
+        let yaml = r"
+version: 1
+network_policies:
+  mcp:
+    name: mcp
+    endpoints:
+      - host: mcp.example.com
+        port: 443
+        protocol: mcp
+        mcp:
+          max_body_bytes: 131072
+        rules:
+          allow:
+            - mcp_method: tools/call
+              tool: search_web
+          deny:
+            - mcp_method: tools/call
+              tool: send_email
+    binaries:
+      - path: /usr/bin/curl
+";
+        let proto1 = parse_sandbox_policy(yaml).expect("parse failed");
+        let yaml_out = serialize_sandbox_policy(&proto1).expect("serialize failed");
+        let proto2 = parse_sandbox_policy(&yaml_out).expect("re-parse failed");
+
+        assert!(yaml_out.contains("protocol: mcp"));
+        assert!(yaml_out.contains("mcp_method: tools/call"));
+        assert!(yaml_out.contains("tool: search_web"));
+        assert!(yaml_out.contains("tool: send_email"));
+        assert!(yaml_out.contains("mcp:"));
+        assert_eq!(proto1, proto2);
     }
 
     #[test]
