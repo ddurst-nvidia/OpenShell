@@ -2437,6 +2437,82 @@ network_policies:
     }
 
     #[test]
+    fn mcp_tool_deny_rule_blocks_tools_call() {
+        let data = r#"
+network_policies:
+  mcp_api:
+    name: mcp_api
+    endpoints:
+      - host: api.example.test
+        port: 443
+        path: "/mcp"
+        protocol: mcp
+        enforcement: enforce
+        mcp:
+          max_body_bytes: 131072
+        rules:
+          deny:
+            - mcp_method: tools/call
+              tool: delete_resource
+          allow:
+            - mcp_method: initialize
+            - mcp_method: tools/list
+            - mcp_method: tools/call
+              tool: read_status
+    binaries:
+      - { path: /usr/bin/node }
+"#;
+        let engine = OpaEngine::from_strings(TEST_POLICY, data).unwrap();
+        let tunnel_engine = engine
+            .clone_engine_for_tunnel(engine.current_generation())
+            .unwrap();
+        let ctx = L7EvalContext {
+            host: "api.example.test".into(),
+            port: 443,
+            policy_name: "mcp_api".into(),
+            binary_path: "/usr/bin/node".into(),
+            ancestors: vec![],
+            cmdline_paths: vec![],
+            secret_resolver: None,
+            activity_tx: None,
+            dynamic_credentials: None,
+            token_grant_resolver: None,
+        };
+        let mut request = L7RequestInfo {
+            action: "POST".into(),
+            target: "/mcp".into(),
+            query_params: std::collections::HashMap::new(),
+            graphql: None,
+            jsonrpc: Some(crate::l7::jsonrpc::parse_mcp_body(
+                br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_status","arguments":{}}}"#,
+            )),
+        };
+
+        let (allowed, reason) = evaluate_l7_request(&tunnel_engine, &ctx, &request).unwrap();
+        assert!(allowed, "{reason}");
+
+        request.jsonrpc = Some(crate::l7::jsonrpc::parse_mcp_body(
+            br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"delete_resource","arguments":{"scope":"workspace/main"}}}"#,
+        ));
+        let parsed = request.jsonrpc.as_ref().expect("parsed MCP request");
+        assert!(
+            parsed.error.is_none(),
+            "MCP request should parse: {parsed:?}"
+        );
+        assert_eq!(
+            parsed.calls.first().and_then(|call| call.tool.as_deref()),
+            Some("delete_resource")
+        );
+
+        let (allowed, reason) = evaluate_l7_request(&tunnel_engine, &ctx, &request).unwrap();
+        assert!(!allowed, "delete_resource must match the MCP deny rule");
+        assert!(
+            reason.contains("deny rule"),
+            "deny reason should identify policy denial: {reason}"
+        );
+    }
+
+    #[test]
     fn jsonrpc_log_records_digest_not_args() {
         let info = crate::l7::jsonrpc::parse_jsonrpc_body(
             br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"delete_resource","arguments":{"scope":"secret-scope"}}}"#,
