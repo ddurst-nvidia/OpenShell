@@ -36,18 +36,18 @@ network_policies:
       - host: ${host}
         port: ${port}
         path: ${path}
-        protocol: json-rpc
+        protocol: mcp
         enforcement: enforce
         allowed_ips:
           - "10.0.0.0/8"
           - "172.0.0.0/8"
           - "192.168.0.0/16"
           - "fc00::/7"
-        json_rpc:
+        mcp:
           max_body_bytes: 131072
         rules:
-          - allow:
-              rpc_method: "*"
+          allow:
+            - mcp_method: "*"
     binaries:
       - path: /bin/sh
       - path: /usr/bin/env

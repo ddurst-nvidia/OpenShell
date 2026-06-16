@@ -723,6 +723,7 @@ fn preprocess_yaml_data(yaml_str: &str) -> Result<String> {
 
     // Normalize port → ports for all endpoints so Rego always sees "ports" array.
     normalize_endpoint_ports(&mut data);
+    normalize_l7_policy_aliases(&mut data);
 
     // Validate BEFORE expanding presets (catches user errors like rules+access)
     let (errors, warnings) = crate::l7::validate_l7_policies(&data);
@@ -796,6 +797,148 @@ fn normalize_endpoint_ports(data: &mut serde_json::Value) {
             // Remove scalar "port" — Rego only uses "ports".
             ep_obj.remove("port");
         }
+    }
+}
+
+fn normalize_l7_policy_aliases(data: &mut serde_json::Value) {
+    let Some(policies) = data
+        .get_mut("network_policies")
+        .and_then(|v| v.as_object_mut())
+    else {
+        return;
+    };
+
+    for (_name, policy) in policies.iter_mut() {
+        let Some(endpoints) = policy.get_mut("endpoints").and_then(|v| v.as_array_mut()) else {
+            continue;
+        };
+
+        for ep in endpoints.iter_mut() {
+            let Some(ep_obj) = ep.as_object_mut() else {
+                continue;
+            };
+            normalize_jsonrpc_config_alias(ep_obj, "json_rpc");
+            normalize_jsonrpc_config_alias(ep_obj, "mcp");
+            normalize_l7_rules_aliases(ep_obj);
+        }
+    }
+}
+
+fn normalize_jsonrpc_config_alias(ep: &mut serde_json::Map<String, serde_json::Value>, key: &str) {
+    let Some(config) = ep.remove(key) else {
+        return;
+    };
+    let Some(max_body_bytes) = config
+        .as_object()
+        .and_then(|obj| obj.get("max_body_bytes"))
+        .and_then(serde_json::Value::as_u64)
+    else {
+        return;
+    };
+    ep.entry("json_rpc_max_body_bytes".to_string())
+        .or_insert_with(|| serde_json::json!(max_body_bytes));
+}
+
+fn normalize_l7_rules_aliases(ep: &mut serde_json::Map<String, serde_json::Value>) {
+    let mut grouped_denies = Vec::new();
+    if let Some(rules) = ep.get_mut("rules") {
+        match rules {
+            serde_json::Value::Array(items) => {
+                for rule in items {
+                    if let Some(allow) = rule
+                        .get_mut("allow")
+                        .and_then(serde_json::Value::as_object_mut)
+                    {
+                        normalize_mcp_rule_aliases(allow);
+                    } else if let Some(allow) = rule.as_object_mut() {
+                        normalize_mcp_rule_aliases(allow);
+                    }
+                }
+            }
+            serde_json::Value::Object(groups) => {
+                let allow_rules = groups
+                    .remove("allow")
+                    .and_then(|v| v.as_array().cloned())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|mut allow| {
+                        if let Some(allow_obj) = allow.as_object_mut() {
+                            normalize_mcp_rule_aliases(allow_obj);
+                        }
+                        serde_json::json!({ "allow": allow })
+                    })
+                    .collect::<Vec<_>>();
+                let deny_rules = groups
+                    .remove("deny")
+                    .and_then(|v| v.as_array().cloned())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|mut deny| {
+                        if let Some(deny_obj) = deny.as_object_mut() {
+                            normalize_mcp_rule_aliases(deny_obj);
+                        }
+                        deny
+                    })
+                    .collect::<Vec<_>>();
+                *rules = serde_json::Value::Array(allow_rules);
+                grouped_denies = deny_rules;
+            }
+            _ => {}
+        }
+    }
+
+    if !grouped_denies.is_empty() {
+        append_denies(ep, grouped_denies);
+    }
+
+    if let Some(denies) = ep.get_mut("deny_rules").and_then(|v| v.as_array_mut()) {
+        for deny in denies {
+            if let Some(deny_obj) = deny.as_object_mut() {
+                normalize_mcp_rule_aliases(deny_obj);
+            }
+        }
+    }
+}
+
+fn append_denies(
+    ep: &mut serde_json::Map<String, serde_json::Value>,
+    mut deny_rules: Vec<serde_json::Value>,
+) {
+    match ep.get_mut("deny_rules") {
+        Some(serde_json::Value::Array(existing)) => existing.append(&mut deny_rules),
+        Some(_) | None => {
+            ep.insert(
+                "deny_rules".to_string(),
+                serde_json::Value::Array(deny_rules),
+            );
+        }
+    }
+}
+
+fn normalize_mcp_rule_aliases(rule: &mut serde_json::Map<String, serde_json::Value>) {
+    if let Some(mcp_method) = rule.remove("mcp_method")
+        && rule
+            .get("rpc_method")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .is_empty()
+    {
+        rule.insert("rpc_method".to_string(), mcp_method);
+    }
+
+    let Some(tool) = rule.remove("tool") else {
+        return;
+    };
+    let Some(tool_name) = tool.as_str().filter(|s| !s.is_empty()) else {
+        return;
+    };
+    let params = rule
+        .entry("params".to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if let Some(params) = params.as_object_mut() {
+        params
+            .entry("name".to_string())
+            .or_insert_with(|| serde_json::Value::String(tool_name.to_string()));
     }
 }
 
@@ -2837,6 +2980,122 @@ network_policies:
             }),
         );
         assert!(!eval_l7(&engine, &blocked_with_args));
+    }
+
+    #[test]
+    fn l7_mcp_grouped_rules_filter_tools_call() {
+        let data = r#"
+network_policies:
+  mcp_params:
+    name: mcp_params
+    endpoints:
+      - host: mcp.params.test
+        port: 8000
+        path: /mcp
+        protocol: mcp
+        enforcement: enforce
+        mcp:
+          max_body_bytes: 131072
+        rules:
+          deny:
+            - mcp_method: tools/call
+              tool: blocked_action
+          allow:
+            - mcp_method: initialize
+            - mcp_method: tools/list
+            - mcp_method: tools/call
+              tool: read_status
+    binaries:
+      - { path: /usr/bin/curl }
+"#;
+        let engine = OpaEngine::from_strings(TEST_POLICY, data).expect("engine from yaml");
+
+        let read_status = l7_jsonrpc_input_with_params(
+            "mcp.params.test",
+            8000,
+            "/mcp",
+            "tools/call",
+            serde_json::json!({"name": "read_status"}),
+        );
+        assert!(eval_l7(&engine, &read_status));
+
+        let blocked = l7_jsonrpc_input_with_params(
+            "mcp.params.test",
+            8000,
+            "/mcp",
+            "tools/call",
+            serde_json::json!({"name": "blocked_action"}),
+        );
+        assert!(!eval_l7(&engine, &blocked));
+    }
+
+    #[test]
+    fn l7_jsonrpc_null_metadata_non_matches_without_opa_error() {
+        let data = r#"
+network_policies:
+  jsonrpc_null:
+    name: jsonrpc_null
+    endpoints:
+      - host: mcp.null.test
+        port: 8000
+        path: /mcp
+        protocol: json-rpc
+        enforcement: enforce
+        rules:
+          - allow:
+              rpc_method: tools/list
+    binaries:
+      - { path: /usr/bin/curl }
+"#;
+        let engine = OpaEngine::from_strings(TEST_POLICY, data).expect("engine from yaml");
+        let input = serde_json::json!({
+            "network": { "host": "mcp.null.test", "port": 8000 },
+            "exec": {
+                "path": "/usr/bin/curl",
+                "ancestors": [],
+                "cmdline_paths": []
+            },
+            "request": {
+                "method": "POST",
+                "path": "/mcp",
+                "query_params": {},
+                "jsonrpc": null
+            }
+        });
+
+        assert!(!eval_l7(&engine, &input));
+    }
+
+    #[test]
+    fn l7_jsonrpc_params_matcher_validation_rejects_invalid_shape() {
+        let data = r#"
+network_policies:
+  invalid_jsonrpc_params:
+    name: invalid_jsonrpc_params
+    endpoints:
+      - host: mcp.invalid.test
+        port: 8000
+        path: /mcp
+        protocol: json-rpc
+        enforcement: enforce
+        rules:
+          - allow:
+              rpc_method: tools/call
+              params:
+                name:
+                  any: []
+    binaries:
+      - { path: /usr/bin/curl }
+"#;
+        let Err(err) = OpaEngine::from_strings(TEST_POLICY, data) else {
+            panic!("invalid params matcher should fail validation");
+        };
+
+        assert!(
+            err.to_string()
+                .contains("params.name.any: list must not be empty"),
+            "unexpected validation error: {err}"
+        );
     }
 
     #[test]

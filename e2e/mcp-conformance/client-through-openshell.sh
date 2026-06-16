@@ -116,5 +116,14 @@ export OPENSHELL_E2E_DOCKER_SANDBOX_IMAGE="${OPENSHELL_E2E_DOCKER_SANDBOX_IMAGE:
   --policy "${POLICY_FILE}" \
   "${ENV_ARGS[@]}" \
   -- \
-  sh -c 'cd /opt/mcp-conformance && exec ./node_modules/.bin/tsx examples/clients/typescript/everything-client.ts "$1"' \
+  sh -c '
+    cd /opt/mcp-conformance
+    # The v0.1.16 everything client only lists tools for this scenario;
+    # test2.ts is the bundled client that calls add_numbers.
+    case "${MCP_CONFORMANCE_SCENARIO:-}" in
+      tools_call|tools-call) client=examples/clients/typescript/test2.ts ;;
+      *) client=examples/clients/typescript/everything-client.ts ;;
+    esac
+    exec ./node_modules/.bin/tsx "$client" "$1"
+  ' \
   sh "${CLIENT_SERVER_URL}"

@@ -28,6 +28,7 @@ pub enum L7Protocol {
     Graphql,
     Sql,
     JsonRpc,
+    Mcp,
 }
 
 impl L7Protocol {
@@ -38,8 +39,13 @@ impl L7Protocol {
             "graphql" => Some(Self::Graphql),
             "sql" => Some(Self::Sql),
             "json-rpc" => Some(Self::JsonRpc),
+            "mcp" => Some(Self::Mcp),
             _ => None,
         }
+    }
+
+    pub fn is_jsonrpc_family(self) -> bool {
+        matches!(self, Self::JsonRpc | Self::Mcp)
     }
 }
 
@@ -483,6 +489,133 @@ fn validate_graphql_rule(
     validate_graphql_fields(errors, warnings, loc, rule.get("fields"));
 }
 
+fn validate_matcher_map(
+    errors: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+    loc: &str,
+    value: Option<&serde_json::Value>,
+) {
+    let Some(value) = value.filter(|v| !v.is_null()) else {
+        return;
+    };
+    let Some(obj) = value.as_object() else {
+        errors.push(format!("{loc}: expected map of matchers"));
+        return;
+    };
+
+    for (key, matcher) in obj {
+        if let Some(glob_str) = matcher.as_str() {
+            if let Some(warning) = check_glob_syntax(glob_str) {
+                warnings.push(format!("{loc}.{key}: {warning}"));
+            }
+            continue;
+        }
+
+        let Some(matcher_obj) = matcher.as_object() else {
+            errors.push(format!(
+                "{loc}.{key}: expected string glob or object with `any`"
+            ));
+            continue;
+        };
+
+        let has_any = matcher_obj.get("any").is_some();
+        let has_glob = matcher_obj.get("glob").is_some();
+        let has_unknown = matcher_obj.keys().any(|k| k != "any" && k != "glob");
+        if has_unknown {
+            errors.push(format!(
+                "{loc}.{key}: unknown matcher keys; only `glob` or `any` are supported"
+            ));
+            continue;
+        }
+
+        if has_glob && has_any {
+            errors.push(format!(
+                "{loc}.{key}: matcher cannot specify both `glob` and `any`"
+            ));
+            continue;
+        }
+
+        if !has_glob && !has_any {
+            errors.push(format!(
+                "{loc}.{key}: object matcher requires `glob` string or non-empty `any` list"
+            ));
+            continue;
+        }
+
+        if has_glob {
+            match matcher_obj.get("glob").and_then(|v| v.as_str()) {
+                None => errors.push(format!("{loc}.{key}.glob: expected glob string")),
+                Some(glob_str) => {
+                    if let Some(warning) = check_glob_syntax(glob_str) {
+                        warnings.push(format!("{loc}.{key}.glob: {warning}"));
+                    }
+                }
+            }
+            continue;
+        }
+
+        let Some(any) = matcher_obj.get("any").and_then(|v| v.as_array()) else {
+            errors.push(format!("{loc}.{key}.any: expected array of glob strings"));
+            continue;
+        };
+        if any.is_empty() {
+            errors.push(format!("{loc}.{key}.any: list must not be empty"));
+            continue;
+        }
+        if any.iter().any(|v| v.as_str().is_none()) {
+            errors.push(format!("{loc}.{key}.any: all values must be strings"));
+        }
+        for item in any.iter().filter_map(|v| v.as_str()) {
+            if let Some(warning) = check_glob_syntax(item) {
+                warnings.push(format!("{loc}.{key}.any: {warning}"));
+            }
+        }
+    }
+}
+
+fn validate_jsonrpc_rule_fields(
+    errors: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+    loc: &str,
+    rule: &serde_json::Value,
+    protocol: &str,
+) {
+    let rpc_method = rule
+        .get("rpc_method")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let has_params = rule.get("params").is_some_and(|v| !v.is_null());
+    let jsonrpc_family = protocol == "json-rpc" || protocol == "mcp";
+
+    if jsonrpc_family {
+        if rpc_method.is_empty() {
+            errors.push(format!(
+                "{loc}.rpc_method: required for {protocol} L7 rules"
+            ));
+        } else if let Some(warning) = check_glob_syntax(rpc_method) {
+            warnings.push(format!("{loc}.rpc_method: {warning}"));
+        }
+        validate_matcher_map(
+            errors,
+            warnings,
+            &format!("{loc}.params"),
+            rule.get("params"),
+        );
+        return;
+    }
+
+    if !rpc_method.is_empty() {
+        errors.push(format!(
+            "{loc}.rpc_method: JSON-RPC method matching is only valid for protocol json-rpc or mcp"
+        ));
+    }
+    if has_params {
+        errors.push(format!(
+            "{loc}.params: JSON-RPC params matching is only valid for protocol json-rpc or mcp"
+        ));
+    }
+}
+
 fn json_rule_has_graphql_fields(rule: &serde_json::Value) -> bool {
     rule.get("operation_type")
         .and_then(|v| v.as_str())
@@ -611,7 +744,7 @@ pub fn validate_l7_policies(data_json: &serde_json::Value) -> (Vec<String>, Vec<
 
             if !protocol.is_empty() && L7Protocol::parse(protocol).is_none() {
                 errors.push(format!(
-                    "{loc}: unknown protocol '{protocol}' (expected rest, websocket, graphql, sql, or json-rpc)"
+                    "{loc}: unknown protocol '{protocol}' (expected rest, websocket, graphql, sql, json-rpc, or mcp)"
                 ));
             }
 
@@ -660,9 +793,12 @@ pub fn validate_l7_policies(data_json: &serde_json::Value) -> (Vec<String>, Vec<
                 ));
             }
 
-            if protocol != "json-rpc" && ep.get("json_rpc_max_body_bytes").is_some() {
+            if protocol != "json-rpc"
+                && protocol != "mcp"
+                && ep.get("json_rpc_max_body_bytes").is_some()
+            {
                 warnings.push(format!(
-                    "{loc}: JSON-RPC-specific endpoint fields are ignored unless protocol is json-rpc"
+                    "{loc}: JSON-RPC-specific endpoint fields are ignored unless protocol is json-rpc or mcp"
                 ));
             }
 
@@ -882,6 +1018,14 @@ pub fn validate_l7_policies(data_json: &serde_json::Value) -> (Vec<String>, Vec<
                             }
                         }
 
+                        validate_jsonrpc_rule_fields(
+                            &mut errors,
+                            &mut warnings,
+                            &deny_loc,
+                            deny_rule,
+                            protocol,
+                        );
+
                         // SQL command validation
                         if let Some(command) = deny_rule.get("command").and_then(|c| c.as_str())
                             && !command.is_empty()
@@ -1058,6 +1202,13 @@ pub fn validate_l7_policies(data_json: &serde_json::Value) -> (Vec<String>, Vec<
                 for (rule_idx, rule) in rules.iter().enumerate() {
                     let allow = rule.get("allow").unwrap_or(rule);
                     let rule_loc = format!("{loc}.rules[{rule_idx}].allow");
+                    validate_jsonrpc_rule_fields(
+                        &mut errors,
+                        &mut warnings,
+                        &rule_loc,
+                        allow,
+                        protocol,
+                    );
                     let allow_has_graphql = json_rule_has_graphql_fields(allow);
                     if websocket_has_graphql_policy
                         && allow
@@ -1139,6 +1290,11 @@ pub fn expand_access_presets(data: &mut serde_json::Value) {
                     "full" => vec![graphql_rule_json("*")],
                     _ => continue,
                 }
+            } else if protocol == "json-rpc" || protocol == "mcp" {
+                match access.as_str() {
+                    "read-only" | "read-write" | "full" => vec![jsonrpc_rule_json("*")],
+                    _ => continue,
+                }
             } else if protocol == "websocket" {
                 match access.as_str() {
                     "read-only" => vec![rule_json("GET", "**")],
@@ -1195,6 +1351,14 @@ fn graphql_rule_json(operation_type: &str) -> serde_json::Value {
     serde_json::json!({
         "allow": {
             "operation_type": operation_type
+        }
+    })
+}
+
+fn jsonrpc_rule_json(rpc_method: &str) -> serde_json::Value {
+    serde_json::json!({
+        "allow": {
+            "rpc_method": rpc_method
         }
     })
 }

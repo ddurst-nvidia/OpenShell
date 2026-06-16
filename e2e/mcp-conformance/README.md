@@ -16,11 +16,15 @@ wrapper rewrites local URLs to `host.openshell.internal`, the alias that
 `e2e/with-docker-gateway.sh` attaches to the job container on the e2e Docker
 network.
 
-The generated policy allows valid JSON-RPC requests to the conformance server
-with `rpc_method: "*"`. That keeps OpenShell deny-by-default at the network
-boundary while allowing the upstream scenarios to exercise MCP behavior. The
-policy body lives in `policy-template.yaml`; the wrapper renders its host, port,
-and path placeholders from the upstream server URL.
+The generated policy uses `protocol: mcp` and allows valid MCP requests to the
+conformance server with `mcp_method: "*"`. That keeps OpenShell deny-by-default
+at the network boundary while allowing the upstream scenarios to exercise MCP
+behavior. The policy body lives in `policy-template.yaml`; the wrapper renders
+its host, port, and path placeholders from the upstream server URL.
+
+For local runs, build or stage a static supervisor binary and pass it with
+`OPENSHELL_DOCKER_SUPERVISOR_BIN` if the default local supervisor build is
+linked against a newer glibc than the conformance client image provides.
 
 The upstream `everything-client` has a few handler names that do not line up
 with released-spec scenario names. The wrapper maps those names when forwarding
@@ -28,5 +32,5 @@ with released-spec scenario names. The wrapper maps those names when forwarding
 checkout.
 
 When enabling broader upstream suites, add scenarios that OpenShell does not yet
-support through the JSON-RPC proxy to `expected-failures.yml`. The upstream
+support through the MCP proxy to `expected-failures.yml`. The upstream
 runner treats listed failures as allowed and treats stale entries as failures.
