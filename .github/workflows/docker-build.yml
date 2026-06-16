@@ -23,10 +23,10 @@ on:
         type: string
         default: "linux/amd64,linux/arm64"
       runner:
-        description: "Deprecated; per-arch native runners are selected automatically"
+        description: "Override the per-arch native runner label"
         required: false
         type: string
-        default: "linux-amd64-cpu8"
+        default: ""
       cargo-version:
         description: "Pre-computed cargo version (skips internal git-based computation)"
         required: false
@@ -100,6 +100,7 @@ jobs:
 
           platform_input="${{ inputs.platform }}"
           platform_input="${platform_input//[[:space:]]/}"
+          runner_override="${{ inputs.runner }}"
           if [[ -z "$platform_input" ]]; then
             echo "platform input must not be empty" >&2
             exit 1
@@ -126,6 +127,9 @@ jobs:
                 exit 1
                 ;;
             esac
+            if [[ -n "$runner_override" ]]; then
+              runner="$runner_override"
+            fi
 
             if [[ $count -gt 0 ]]; then
               matrix+=','
@@ -164,6 +168,7 @@ jobs:
       checkout-ref: ${{ inputs['checkout-ref'] }}
       features: ${{ inputs.component == 'gateway' && 'openshell-core/dev-settings bundled-z3' || 'openshell-core/dev-settings' }}
       artifact-name: ${{ needs.resolve.outputs.artifact_prefix }}-linux-${{ matrix.arch }}
+      runner: ${{ matrix.runner }}
     secrets: inherit
 
   build:
@@ -174,20 +179,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
-    container:
-      image: ghcr.io/nvidia/openshell/ci:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-      options: --privileged
-      volumes:
-        - /var/run/docker.sock:/var/run/docker.sock
-        # Expose the nv-gha-runners buildkitd.toml registry mirror config
-        # inside the container so setup-buildx can read it.
-        - /etc/buildkit:/etc/buildkit:ro
     env:
       IMAGE_TAG: ${{ format('{0}-{1}', needs.resolve.outputs.image_tag_base, matrix.arch) }}
-      IMAGE_REGISTRY: ghcr.io/nvidia/openshell
+      IMAGE_REGISTRY: ${{ format('ghcr.io/{0}/openshell', github.repository_owner == 'NVIDIA' && 'nvidia' || github.repository_owner) }}
       DOCKER_PUSH: ${{ inputs.push && '1' || '0' }}
       DOCKER_PLATFORM: ${{ matrix.platform }}
     steps:
@@ -199,6 +193,12 @@ jobs:
       - name: Mark workspace safe for git
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
+      - name: Install mise
+        run: |
+          curl https://mise.run | MISE_VERSION=v2026.4.25 sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.local/share/mise/shims" >> "$GITHUB_PATH"
+
       - name: Install tools
         run: mise install --locked
 
@@ -209,7 +209,7 @@ jobs:
       - name: Set up buildx (local driver)
         uses: ./.github/actions/setup-buildx
         with:
-          buildkitd-config: /etc/buildkit/buildkitd.toml
+          buildkitd-config: ${{ matrix.runner == 'ubuntu-latest' && '' || '/etc/buildkit/buildkitd.toml' }}
 
       - name: Download Rust binary artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -263,15 +263,8 @@ jobs:
     name: Merge ${{ inputs.component }} manifest
     needs: [resolve, build]
     if: ${{ inputs.push && inputs['publish-manifest'] }}
-    runs-on: linux-amd64-cpu8
+    runs-on: ${{ inputs.runner || 'linux-amd64-cpu8' }}
     timeout-minutes: 10
-    container:
-      image: ghcr.io/nvidia/openshell/ci:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-      volumes:
-        - /var/run/docker.sock:/var/run/docker.sock
     steps:
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
@@ -279,7 +272,7 @@ jobs:
       - name: Create multi-arch manifest
         run: |
           set -euo pipefail
-          image="ghcr.io/nvidia/openshell/${{ inputs.component }}"
+          image="${{ format('ghcr.io/{0}/openshell/{1}', github.repository_owner == 'NVIDIA' && 'nvidia' || github.repository_owner, inputs.component) }}"
           refs=()
           for arch in ${{ needs.resolve.outputs.arches }}; do
             refs+=("${image}:${{ needs.resolve.outputs.image_tag_base }}-${arch}")

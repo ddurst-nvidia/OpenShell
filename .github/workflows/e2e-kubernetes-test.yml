@@ -102,10 +102,12 @@ jobs:
           chmod 600 "$GITHUB_WORKSPACE/kubeconfig"
 
       - name: Load gateway and supervisor images into kind
+        env:
+          OPENSHELL_REGISTRY: ${{ format('ghcr.io/{0}/openshell', github.repository_owner == 'NVIDIA' && 'nvidia' || github.repository_owner) }}
         run: |
           set -euo pipefail
           for component in gateway supervisor; do
-            image="ghcr.io/nvidia/openshell/${component}:${{ inputs.image-tag }}"
+            image="${OPENSHELL_REGISTRY}/${component}:${{ inputs.image-tag }}"
             archive="${RUNNER_TEMP:-/tmp}/openshell-${component}-linux-amd64.tar"
             docker pull --platform linux/amd64 "$image"
             docker image save --platform linux/amd64 --output "$archive" "$image"
@@ -118,5 +120,5 @@ jobs:
           OPENSHELL_E2E_KUBE_EXTRA_VALUES: ${{ inputs.extra-helm-values }}
           OPENSHELL_E2E_KUBE_EXTERNAL_POSTGRES_SECRET: ${{ inputs.external-postgres-secret }}
           IMAGE_TAG: ${{ inputs.image-tag }}
-          OPENSHELL_REGISTRY: ghcr.io/nvidia/openshell
+          OPENSHELL_REGISTRY: ${{ format('ghcr.io/{0}/openshell', github.repository_owner == 'NVIDIA' && 'nvidia' || github.repository_owner) }}
         run: mise run --no-deps --skip-deps e2e:kubernetes

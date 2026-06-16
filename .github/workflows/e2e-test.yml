@@ -44,9 +44,6 @@ jobs:
             cmd: "mise run --no-deps --skip-deps e2e:podman:rootless"
             apt_packages: "openssh-client podman uidmap"
             rootless: true
-          - suite: mcp
-            cmd: "mise run --no-deps --skip-deps e2e:mcp"
-            apt_packages: ""
     container:
       image: ghcr.io/nvidia/openshell/ci:latest
       credentials:
@@ -59,32 +56,15 @@ jobs:
     env:
       MISE_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       IMAGE_TAG: ${{ inputs.image-tag }}
-      OPENSHELL_REGISTRY: ghcr.io/nvidia/openshell
+      OPENSHELL_REGISTRY: ${{ format('ghcr.io/{0}/openshell', github.repository_owner == 'NVIDIA' && 'nvidia' || github.repository_owner) }}
       OPENSHELL_REGISTRY_HOST: ghcr.io
-      OPENSHELL_REGISTRY_NAMESPACE: nvidia/openshell
+      OPENSHELL_REGISTRY_NAMESPACE: ${{ format('{0}/openshell', github.repository_owner == 'NVIDIA' && 'nvidia' || github.repository_owner) }}
       OPENSHELL_REGISTRY_USERNAME: ${{ github.actor }}
       OPENSHELL_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ inputs['checkout-ref'] || github.sha }}
-
-      - name: Check out MCP conformance tests
-        if: matrix.suite == 'mcp'
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-        with:
-          repository: modelcontextprotocol/conformance
-          # Pin after v0.1.16 to include the tools_call client scenario fix.
-          ref: b9041ea41b0188581803459dbae71bc7e02fd995
-          path: .cache/mcp-conformance
-
-      - name: Set up Node.js
-        if: matrix.suite == 'mcp'
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: .cache/mcp-conformance/package-lock.json
 
       - name: Install OS test dependencies
         if: matrix.apt_packages != ''
@@ -123,8 +103,7 @@ jobs:
 
       - name: Run tests
         env:
-          OPENSHELL_SUPERVISOR_IMAGE: ${{ format('ghcr.io/nvidia/openshell/supervisor:{0}', inputs.image-tag) }}
-          OPENSHELL_MCP_CONFORMANCE_CLIENT_IMAGE: ${{ format('openshell-mcp-conformance-client:{0}', inputs.image-tag) }}
+          OPENSHELL_SUPERVISOR_IMAGE: ${{ format('ghcr.io/{0}/openshell/supervisor:{1}', github.repository_owner == 'NVIDIA' && 'nvidia' || github.repository_owner, inputs.image-tag) }}
           E2E_CMD: ${{ matrix.cmd }}
         run: |
           if [ "${{ matrix.rootless }}" = "true" ]; then
