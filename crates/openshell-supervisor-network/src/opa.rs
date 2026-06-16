@@ -3171,6 +3171,9 @@ network_policies:
           - allow:
               method: tools/call
               tool: read_status
+              params:
+                arguments:
+                  scope: workspace/main
         deny_rules:
           - method: tools/call
             tool: blocked_action
@@ -3184,9 +3187,24 @@ network_policies:
             8000,
             "/mcp",
             "tools/call",
-            serde_json::json!({"name": "read_status"}),
+            serde_json::json!({
+                "name": "read_status",
+                "arguments.scope": "workspace/main"
+            }),
         );
         assert!(eval_l7(&engine, &read_status));
+
+        let wrong_scope = l7_jsonrpc_input_with_params(
+            "mcp.params.test",
+            8000,
+            "/mcp",
+            "tools/call",
+            serde_json::json!({
+                "name": "read_status",
+                "arguments.scope": "workspace/other"
+            }),
+        );
+        assert!(!eval_l7(&engine, &wrong_scope));
 
         let blocked = l7_jsonrpc_input_with_params(
             "mcp.params.test",

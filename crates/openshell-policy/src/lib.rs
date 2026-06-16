@@ -261,17 +261,24 @@ struct L7AllowDef {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     tool: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    params: BTreeMap<String, QueryMatcherDef>,
+    params: BTreeMap<String, ParamMatcherDef>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 enum QueryMatcherDef {
     Glob(String),
     Any(QueryAnyDef),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum ParamMatcherDef {
+    Matcher(QueryMatcherDef),
+    Object(BTreeMap<String, ParamMatcherDef>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct QueryAnyDef {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -302,7 +309,7 @@ struct L7DenyRuleDef {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     tool: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    params: BTreeMap<String, QueryMatcherDef>,
+    params: BTreeMap<String, ParamMatcherDef>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -341,6 +348,91 @@ fn matcher_glob(glob: String) -> QueryMatcherDef {
     QueryMatcherDef::Glob(glob)
 }
 
+fn param_matcher_glob(glob: String) -> ParamMatcherDef {
+    ParamMatcherDef::Matcher(matcher_glob(glob))
+}
+
+fn flatten_param_matchers(
+    params: BTreeMap<String, ParamMatcherDef>,
+) -> BTreeMap<String, QueryMatcherDef> {
+    let mut flattened = BTreeMap::new();
+    for (key, matcher) in params {
+        flatten_param_matcher(&key, matcher, &mut flattened);
+    }
+    flattened
+}
+
+fn flatten_param_matcher(
+    key: &str,
+    matcher: ParamMatcherDef,
+    out: &mut BTreeMap<String, QueryMatcherDef>,
+) {
+    match matcher {
+        ParamMatcherDef::Matcher(matcher) => {
+            out.insert(key.to_string(), matcher);
+        }
+        ParamMatcherDef::Object(children) => {
+            for (child_key, child) in children {
+                let nested_key = format!("{key}.{child_key}");
+                flatten_param_matcher(&nested_key, child, out);
+            }
+        }
+    }
+}
+
+fn flat_params_to_def(
+    protocol: &str,
+    params: BTreeMap<String, QueryMatcherDef>,
+) -> BTreeMap<String, ParamMatcherDef> {
+    let flat = params.into_iter().collect::<Vec<_>>();
+    if !is_mcp_protocol(protocol) {
+        return flat_param_matchers_to_def(flat);
+    }
+
+    let mut nested = BTreeMap::new();
+    for (key, matcher) in &flat {
+        if insert_nested_param(&mut nested, key, ParamMatcherDef::Matcher(matcher.clone())).is_err()
+        {
+            return flat_param_matchers_to_def(flat);
+        }
+    }
+    nested
+}
+
+fn flat_param_matchers_to_def(
+    params: Vec<(String, QueryMatcherDef)>,
+) -> BTreeMap<String, ParamMatcherDef> {
+    params
+        .into_iter()
+        .map(|(key, matcher)| (key, ParamMatcherDef::Matcher(matcher)))
+        .collect()
+}
+
+fn insert_nested_param(
+    root: &mut BTreeMap<String, ParamMatcherDef>,
+    key: &str,
+    matcher: ParamMatcherDef,
+) -> Result<(), ()> {
+    let mut parts = key.split('.').peekable();
+    let Some(first) = parts.next() else {
+        return Err(());
+    };
+
+    if parts.peek().is_none() {
+        root.insert(first.to_string(), matcher);
+        return Ok(());
+    }
+
+    let child = root
+        .entry(first.to_string())
+        .or_insert_with(|| ParamMatcherDef::Object(BTreeMap::new()));
+    let ParamMatcherDef::Object(children) = child else {
+        return Err(());
+    };
+    let remainder = parts.collect::<Vec<_>>().join(".");
+    insert_nested_param(children, &remainder, matcher)
+}
+
 fn method_from_aliases(rpc_method: String, mcp_method: String) -> String {
     if mcp_method.is_empty() {
         rpc_method
@@ -350,13 +442,13 @@ fn method_from_aliases(rpc_method: String, mcp_method: String) -> String {
 }
 
 fn params_with_tool(
-    mut params: BTreeMap<String, QueryMatcherDef>,
+    mut params: BTreeMap<String, ParamMatcherDef>,
     tool: String,
-) -> BTreeMap<String, QueryMatcherDef> {
+) -> BTreeMap<String, ParamMatcherDef> {
     if !tool.is_empty() {
         params
             .entry("name".to_string())
-            .or_insert_with(|| matcher_glob(tool));
+            .or_insert_with(|| param_matcher_glob(tool));
     }
     params
 }
@@ -375,7 +467,7 @@ fn allow_def_to_proto(allow: L7AllowDef) -> L7Allow {
             .into_iter()
             .map(|(key, matcher)| (key, matcher_def_to_proto(matcher)))
             .collect(),
-        params: params_with_tool(allow.params, allow.tool)
+        params: flatten_param_matchers(params_with_tool(allow.params, allow.tool))
             .into_iter()
             .map(|(key, matcher)| (key, matcher_def_to_proto(matcher)))
             .collect(),
@@ -396,7 +488,7 @@ fn deny_def_to_proto(deny: L7DenyRuleDef) -> L7DenyRule {
             .into_iter()
             .map(|(key, matcher)| (key, matcher_def_to_proto(matcher)))
             .collect(),
-        params: params_with_tool(deny.params, deny.tool)
+        params: flatten_param_matchers(params_with_tool(deny.params, deny.tool))
             .into_iter()
             .map(|(key, matcher)| (key, matcher_def_to_proto(matcher)))
             .collect(),
@@ -441,6 +533,7 @@ fn allow_proto_to_def(protocol: &str, allow: L7Allow) -> L7AllowDef {
         .map(|(key, matcher)| (key, matcher_proto_to_def(matcher)))
         .collect();
     let (tool, params) = split_tool_param(protocol, params);
+    let params = flat_params_to_def(protocol, params);
     let (rpc_method, mcp_method) = if is_mcp_protocol(protocol) {
         (String::new(), allow.rpc_method)
     } else {
@@ -472,6 +565,7 @@ fn deny_proto_to_def(protocol: &str, deny: &L7DenyRule) -> L7DenyRuleDef {
         .map(|(key, matcher)| (key.clone(), matcher_proto_to_def(matcher.clone())))
         .collect();
     let (tool, params) = split_tool_param(protocol, params);
+    let params = flat_params_to_def(protocol, params);
     let (rpc_method, mcp_method) = if is_mcp_protocol(protocol) {
         (String::new(), deny.rpc_method.clone())
     } else {
@@ -1955,7 +2049,8 @@ network_policies:
             - mcp_method: tools/call
               tool: search_web
               params:
-                arguments.repository: NVIDIA/OpenShell
+                arguments:
+                  repository: NVIDIA/OpenShell
     binaries:
       - path: /usr/bin/curl
 ";
@@ -1996,6 +2091,9 @@ network_policies:
           allow:
             - mcp_method: tools/call
               tool: search_web
+              params:
+                arguments:
+                  repository: NVIDIA/OpenShell
           deny:
             - mcp_method: tools/call
               tool: send_email
@@ -2010,6 +2108,9 @@ network_policies:
         assert!(yaml_out.contains("mcp_method: tools/call"));
         assert!(yaml_out.contains("tool: search_web"));
         assert!(yaml_out.contains("tool: send_email"));
+        assert!(yaml_out.contains("arguments:"));
+        assert!(yaml_out.contains("repository: NVIDIA/OpenShell"));
+        assert!(!yaml_out.contains("arguments.repository"));
         assert!(yaml_out.contains("mcp:"));
         assert_eq!(proto1, proto2);
     }
