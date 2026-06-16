@@ -504,71 +504,84 @@ fn validate_matcher_map(
     };
 
     for (key, matcher) in obj {
-        if let Some(glob_str) = matcher.as_str() {
-            if let Some(warning) = check_glob_syntax(glob_str) {
-                warnings.push(format!("{loc}.{key}: {warning}"));
-            }
-            continue;
+        validate_matcher_value(errors, warnings, &format!("{loc}.{key}"), matcher);
+    }
+}
+
+fn validate_matcher_value(
+    errors: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+    loc: &str,
+    matcher: &serde_json::Value,
+) {
+    if let Some(glob_str) = matcher.as_str() {
+        if let Some(warning) = check_glob_syntax(glob_str) {
+            warnings.push(format!("{loc}: {warning}"));
         }
+        return;
+    }
 
-        let Some(matcher_obj) = matcher.as_object() else {
-            errors.push(format!(
-                "{loc}.{key}: expected string glob or object with `any`"
-            ));
-            continue;
-        };
+    let Some(matcher_obj) = matcher.as_object() else {
+        errors.push(format!(
+            "{loc}: expected string glob, matcher object, or nested matcher map"
+        ));
+        return;
+    };
 
-        let has_any = matcher_obj.get("any").is_some();
-        let has_glob = matcher_obj.get("glob").is_some();
-        let has_unknown = matcher_obj.keys().any(|k| k != "any" && k != "glob");
-        if has_unknown {
-            errors.push(format!(
-                "{loc}.{key}: unknown matcher keys; only `glob` or `any` are supported"
-            ));
-            continue;
+    let has_any = matcher_obj.get("any").is_some();
+    let has_glob = matcher_obj.get("glob").is_some();
+    if !has_any && !has_glob {
+        if matcher_obj.is_empty() {
+            errors.push(format!("{loc}: nested matcher map must not be empty"));
+            return;
         }
-
-        if has_glob && has_any {
-            errors.push(format!(
-                "{loc}.{key}: matcher cannot specify both `glob` and `any`"
-            ));
-            continue;
+        for (key, child) in matcher_obj {
+            validate_matcher_value(errors, warnings, &format!("{loc}.{key}"), child);
         }
+        return;
+    }
 
-        if !has_glob && !has_any {
-            errors.push(format!(
-                "{loc}.{key}: object matcher requires `glob` string or non-empty `any` list"
-            ));
-            continue;
-        }
+    let has_unknown = matcher_obj.keys().any(|k| k != "any" && k != "glob");
+    if has_unknown {
+        errors.push(format!(
+            "{loc}: unknown matcher keys; only `glob` or `any` are supported"
+        ));
+        return;
+    }
 
-        if has_glob {
-            match matcher_obj.get("glob").and_then(|v| v.as_str()) {
-                None => errors.push(format!("{loc}.{key}.glob: expected glob string")),
-                Some(glob_str) => {
-                    if let Some(warning) = check_glob_syntax(glob_str) {
-                        warnings.push(format!("{loc}.{key}.glob: {warning}"));
-                    }
+    if has_glob && has_any {
+        errors.push(format!(
+            "{loc}: matcher cannot specify both `glob` and `any`"
+        ));
+        return;
+    }
+
+    if has_glob {
+        match matcher_obj.get("glob").and_then(|v| v.as_str()) {
+            None => errors.push(format!("{loc}.glob: expected glob string")),
+            Some(glob_str) => {
+                if let Some(warning) = check_glob_syntax(glob_str) {
+                    warnings.push(format!("{loc}.glob: {warning}"));
                 }
             }
-            continue;
         }
+        return;
+    }
 
-        let Some(any) = matcher_obj.get("any").and_then(|v| v.as_array()) else {
-            errors.push(format!("{loc}.{key}.any: expected array of glob strings"));
-            continue;
-        };
-        if any.is_empty() {
-            errors.push(format!("{loc}.{key}.any: list must not be empty"));
-            continue;
-        }
-        if any.iter().any(|v| v.as_str().is_none()) {
-            errors.push(format!("{loc}.{key}.any: all values must be strings"));
-        }
-        for item in any.iter().filter_map(|v| v.as_str()) {
-            if let Some(warning) = check_glob_syntax(item) {
-                warnings.push(format!("{loc}.{key}.any: {warning}"));
-            }
+    let Some(any) = matcher_obj.get("any").and_then(|v| v.as_array()) else {
+        errors.push(format!("{loc}.any: expected array of glob strings"));
+        return;
+    };
+    if any.is_empty() {
+        errors.push(format!("{loc}.any: list must not be empty"));
+        return;
+    }
+    if any.iter().any(|v| v.as_str().is_none()) {
+        errors.push(format!("{loc}.any: all values must be strings"));
+    }
+    for item in any.iter().filter_map(|v| v.as_str()) {
+        if let Some(warning) = check_glob_syntax(item) {
+            warnings.push(format!("{loc}.any: {warning}"));
         }
     }
 }
@@ -2419,6 +2432,43 @@ mod tests {
         assert!(
             errors.is_empty(),
             "valid query matcher shapes should not error: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_jsonrpc_nested_params_matchers_are_accepted() {
+        let data = serde_json::json!({
+            "network_policies": {
+                "test": {
+                    "endpoints": [{
+                        "host": "mcp.example.com",
+                        "port": 443,
+                        "protocol": "mcp",
+                        "rules": [{
+                            "allow": {
+                                "rpc_method": "tools/call",
+                                "params": {
+                                    "name": "submit_report",
+                                    "arguments": {
+                                        "scope": "workspace/main",
+                                        "repository": { "any": ["NVIDIA/OpenShell", "NVIDIA/*"] }
+                                    }
+                                }
+                            }
+                        }]
+                    }],
+                    "binaries": []
+                }
+            }
+        });
+        let (errors, warnings) = validate_l7_policies(&data);
+        assert!(
+            errors.is_empty(),
+            "valid nested params matchers should not error: {errors:?}"
+        );
+        assert!(
+            warnings.is_empty(),
+            "valid nested params matchers should not warn: {warnings:?}"
         );
     }
 

@@ -608,7 +608,8 @@ MCP and JSON-RPC endpoint policies currently require full policy YAML applied wi
             - mcp_method: tools/call
               tool: submit_report
               params:
-                arguments.scope: workspace/main
+                arguments:
+                  scope: workspace/main
           deny:
             - mcp_method: tools/call
               tool: delete_resource
@@ -620,7 +621,7 @@ MCP and JSON-RPC endpoint policies currently require full policy YAML applied wi
 
 Use `protocol: json-rpc` and `rpc_method` when you need generic JSON-RPC 2.0 matching for a non-MCP server. `json_rpc.max_body_bytes` controls the generic JSON-RPC inspection buffer.
 
-`params` matchers are case-sensitive and use the same string glob or `{ any: [...] }` matcher syntax as REST query parameters. They match scalar leaf values from object params: strings, numbers, and booleans are converted to strings, and nested JSON object params are flattened with dot-separated keys before matching. Arrays, `null`, and non-object top-level params do not produce matcher keys. Requests with literal `.` characters in params object keys are rejected before policy evaluation because they are ambiguous with flattened nested paths. This is useful for controls such as matching MCP `tools/call` by `tool` or `params.name`, but it is not a complete MCP payload policy for rich nested content. For batch requests, OpenShell evaluates each JSON-RPC call independently and denies the whole batch if any call is denied.
+`params` matchers are case-sensitive and use the same string glob or `{ any: [...] }` matcher syntax as REST query parameters. Write them as nested maps that mirror MCP params. OpenShell flattens the matcher map internally before evaluating scalar leaf values from object params: strings, numbers, and booleans are converted to strings. Dot-separated matcher keys remain accepted for compatibility. Arrays, `null`, and non-object top-level params do not produce matcher keys. Requests with literal `.` characters in params object keys are rejected before policy evaluation because they are ambiguous with flattened nested paths. This is useful for controls such as matching MCP `tools/call` by `tool` or `params.name`, but it is not a complete MCP payload policy for rich nested content. For batch requests, OpenShell evaluates each JSON-RPC call independently and denies the whole batch if any call is denied.
 
 ### GraphQL matching
 

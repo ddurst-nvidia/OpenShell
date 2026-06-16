@@ -926,20 +926,59 @@ fn normalize_mcp_rule_aliases(rule: &mut serde_json::Map<String, serde_json::Val
         rule.insert("rpc_method".to_string(), mcp_method);
     }
 
-    let Some(tool) = rule.remove("tool") else {
-        return;
-    };
-    let Some(tool_name) = tool.as_str().filter(|s| !s.is_empty()) else {
-        return;
-    };
-    let params = rule
-        .entry("params".to_string())
-        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-    if let Some(params) = params.as_object_mut() {
-        params
-            .entry("name".to_string())
-            .or_insert_with(|| serde_json::Value::String(tool_name.to_string()));
+    if let Some(tool) = rule.remove("tool")
+        && let Some(tool_name) = tool.as_str().filter(|s| !s.is_empty())
+    {
+        let params = rule
+            .entry("params".to_string())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if let Some(params) = params.as_object_mut() {
+            params
+                .entry("name".to_string())
+                .or_insert_with(|| serde_json::Value::String(tool_name.to_string()));
+        }
     }
+
+    normalize_jsonrpc_params(rule);
+}
+
+fn normalize_jsonrpc_params(rule: &mut serde_json::Map<String, serde_json::Value>) {
+    let Some(params) = rule
+        .get_mut("params")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+
+    let mut flattened = serde_json::Map::new();
+    for (key, matcher) in std::mem::take(params) {
+        flatten_jsonrpc_param_matcher(&key, matcher, &mut flattened);
+    }
+    *params = flattened;
+}
+
+fn flatten_jsonrpc_param_matcher(
+    key: &str,
+    matcher: serde_json::Value,
+    out: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    let serde_json::Value::Object(children) = matcher else {
+        out.insert(key.to_string(), matcher);
+        return;
+    };
+
+    if is_jsonrpc_matcher_object(&children) || children.is_empty() {
+        out.insert(key.to_string(), serde_json::Value::Object(children));
+        return;
+    }
+
+    for (child_key, child) in children {
+        flatten_jsonrpc_param_matcher(&format!("{key}.{child_key}"), child, out);
+    }
+}
+
+fn is_jsonrpc_matcher_object(obj: &serde_json::Map<String, serde_json::Value>) -> bool {
+    obj.contains_key("any") || obj.contains_key("glob")
 }
 
 /// Resolve a policy binary path through the container's root filesystem.
@@ -3005,6 +3044,9 @@ network_policies:
             - mcp_method: tools/list
             - mcp_method: tools/call
               tool: read_status
+              params:
+                arguments:
+                  scope: workspace/main
     binaries:
       - { path: /usr/bin/curl }
 "#;
@@ -3015,9 +3057,24 @@ network_policies:
             8000,
             "/mcp",
             "tools/call",
-            serde_json::json!({"name": "read_status"}),
+            serde_json::json!({
+                "name": "read_status",
+                "arguments.scope": "workspace/main"
+            }),
         );
         assert!(eval_l7(&engine, &read_status));
+
+        let wrong_scope = l7_jsonrpc_input_with_params(
+            "mcp.params.test",
+            8000,
+            "/mcp",
+            "tools/call",
+            serde_json::json!({
+                "name": "read_status",
+                "arguments.scope": "workspace/other"
+            }),
+        );
+        assert!(!eval_l7(&engine, &wrong_scope));
 
         let blocked = l7_jsonrpc_input_with_params(
             "mcp.params.test",

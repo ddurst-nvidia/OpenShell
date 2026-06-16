@@ -288,7 +288,7 @@ Use grouped `rules.allow` and `rules.deny` for MCP policies. Deny rules take pre
 |---|---|---|---|
 | `mcp_method` | string | Yes | MCP method name or OpenShell glob, such as `initialize`, `tools/list`, `tools/call`, or `tools/*`. `*` is OpenShell policy matching syntax, not JSON-RPC method syntax. |
 | `tool` | string | No | Convenience matcher for `tools/call` `params.name`. Omit to match every tool for the method. |
-| `params` | map | No | Params matchers keyed by flattened object-param path. Use dot-separated keys for nested object params, such as `arguments.repository`. Matcher value can be a glob string or an object with `any`. Requests with literal `.` characters in params object keys are rejected before policy evaluation. |
+| `params` | map | No | Nested params matcher map. Matcher leaves can be a glob string or an object with `any`. Dot-separated keys such as `arguments.repository` remain accepted for compatibility. Requests with literal `.` characters in params object keys are rejected before policy evaluation. |
 
 Example MCP rules:
 
@@ -315,7 +315,8 @@ endpoints:
         - mcp_method: tools/call
           tool: create_issue
           params:
-            arguments.repository: NVIDIA/OpenShell
+            arguments:
+              repository: NVIDIA/OpenShell
 ```
 
 ##### JSON-RPC Allow Rule (`protocol: json-rpc`)
@@ -325,7 +326,7 @@ JSON-RPC allow rules match sandbox-to-server JSON-RPC-over-HTTP request objects 
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `rpc_method` | string | Yes | JSON-RPC method name or OpenShell glob, such as `initialize`, `tools/list`, or `tools/*`. `*` is OpenShell policy matching syntax, not JSON-RPC method syntax. |
-| `params` | map | No | Params matchers keyed by flattened object-param path. Use dot-separated keys for nested object params, such as `arguments.scope`. Matcher value can be a glob string or an object with `any`. Strings, numbers, and booleans are converted to strings; arrays, `null`, and non-object top-level params do not produce matcher keys. Requests with literal `.` characters in params object keys are rejected before policy evaluation because they are ambiguous with flattened nested paths. |
+| `params` | map | No | Nested params matcher map. Matcher leaves can be a glob string or an object with `any`. Dot-separated keys such as `arguments.scope` remain accepted for compatibility. Strings, numbers, and booleans are converted to strings; arrays, `null`, and non-object top-level params do not produce matcher keys. Requests with literal `.` characters in params object keys are rejected before policy evaluation because they are ambiguous with flattened nested paths. |
 
 Example JSON-RPC allow rules:
 
@@ -351,7 +352,8 @@ endpoints:
           rpc_method: tools/call
           params:
             name: submit_report
-            arguments.scope: workspace/main
+            arguments:
+              scope: workspace/main
 ```
 
 #### Deny Rule Objects
