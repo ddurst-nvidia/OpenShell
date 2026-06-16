@@ -16,12 +16,16 @@ use crate::l7::provider::{L7Provider, L7Request};
 
 pub const DEFAULT_MAX_BODY_BYTES: usize = 64 * 1024;
 
+/// Selects whether the parser should treat a JSON-RPC message as generic
+/// JSON-RPC 2.0 or as an MCP message with MCP method/params validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JsonRpcInspectionMode {
     JsonRpc,
     Mcp,
 }
 
+/// Parsed HTTP request plus the JSON-RPC-family metadata extracted from the
+/// body. The original HTTP request is still forwarded if policy allows it.
 pub struct JsonRpcHttpRequest {
     pub request: L7Request,
     pub info: JsonRpcRequestInfo,
@@ -51,6 +55,8 @@ pub(crate) async fn parse_jsonrpc_http_request<C: AsyncRead + AsyncWrite + Unpin
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JsonRpcRequestInfo {
+    /// Calls found in the request body. Responses and receive-stream GETs have
+    /// no calls but are still represented so policy can allow relay behavior.
     pub calls: Vec<JsonRpcCallInfo>,
     pub is_batch: bool,
     pub receive_stream: bool,
@@ -60,12 +66,20 @@ pub struct JsonRpcRequestInfo {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JsonRpcCallInfo {
+    /// JSON-RPC method, or the MCP method name after typed MCP parsing.
     pub method: String,
+    /// Flattened scalar params used by the current Rego matcher path. Strings,
+    /// numbers, and booleans are represented as strings for compatibility with
+    /// the existing query matcher implementation.
     pub params: HashMap<String, String>,
+    /// MCP `tools/call` tool name when known. Generic JSON-RPC leaves this as
+    /// a best-effort projection of `params.name`.
     pub tool: Option<String>,
 }
 
 impl JsonRpcRequestInfo {
+    /// MCP streamable HTTP uses an empty GET to receive server messages. It has
+    /// no request body to inspect, but it must still pass through MCP endpoints.
     pub(crate) fn receive_stream() -> Self {
         Self {
             calls: Vec::new(),
@@ -76,6 +90,8 @@ impl JsonRpcRequestInfo {
         }
     }
 
+    /// Logs store only a digest of params. For batches, hash the per-call
+    /// canonical maps so denied-call logging cannot leak raw argument values.
     pub(crate) fn params_sha256(&self) -> Option<String> {
         if self.is_batch {
             if self.calls.is_empty() || self.calls.iter().all(|call| call.params.is_empty()) {
@@ -134,6 +150,8 @@ pub fn parse_jsonrpc_body(body: &[u8]) -> JsonRpcRequestInfo {
     parse_jsonrpc_body_with_mode(body, JsonRpcInspectionMode::JsonRpc)
 }
 
+/// Parse a JSON-RPC body as MCP, using tower-mcp-types for known MCP request
+/// and notification shapes while still allowing extension methods.
 pub fn parse_mcp_body(body: &[u8]) -> JsonRpcRequestInfo {
     parse_jsonrpc_body_with_mode(body, JsonRpcInspectionMode::Mcp)
 }
@@ -218,6 +236,8 @@ enum JsonRpcMessageInfo {
     Response,
 }
 
+// Shared framing for JSON-RPC-family messages. MCP-specific validation starts
+// only after the common JSON-RPC version/method/response checks.
 fn parse_jsonrpc_message(
     value: &serde_json::Value,
     inspection_mode: JsonRpcInspectionMode,
@@ -252,6 +272,8 @@ fn parse_jsonrpc_call(
     value: &serde_json::Value,
     inspection_mode: JsonRpcInspectionMode,
 ) -> std::result::Result<JsonRpcCallInfo, String> {
+    // MCP mode delegates method-specific validation to tower-mcp-types. The
+    // generic mode intentionally remains looser for non-MCP JSON-RPC servers.
     if inspection_mode == JsonRpcInspectionMode::Mcp {
         return parse_mcp_call(value);
     }
@@ -300,6 +322,9 @@ fn parse_jsonrpc_response(value: &serde_json::Value) -> std::result::Result<(), 
 
 fn parse_mcp_call(value: &serde_json::Value) -> std::result::Result<JsonRpcCallInfo, String> {
     if value.get("id").is_some() {
+        // Requests can be converted into typed MCP variants, which gives us
+        // method names and tool-call params without maintaining local copies of
+        // the MCP request schema.
         let request: JsonRpcRequest = serde_json::from_value(value.clone())
             .map_err(|error| format!("invalid MCP request: {error}"))?;
         request
@@ -314,6 +339,8 @@ fn parse_mcp_call(value: &serde_json::Value) -> std::result::Result<JsonRpcCallI
             tool: mcp_tool_name(&mcp_request),
         });
     } else {
+        // Notifications have no id and no response expectation. Validate them
+        // as MCP notifications but keep extension notifications addressable.
         let notification: JsonRpcNotification = serde_json::from_value(value.clone())
             .map_err(|error| format!("invalid MCP notification: {error}"))?;
         if notification.jsonrpc != JSONRPC_VERSION {
@@ -372,6 +399,8 @@ fn flatten_json_value(
     value: &serde_json::Value,
     out: &mut HashMap<String, String>,
 ) -> std::result::Result<(), String> {
+    // Keep the runtime input flat for the existing OPA matcher, while rejecting
+    // literal dotted keys that would collide with nested object paths.
     match value {
         serde_json::Value::Object(map) => {
             for (key, child) in map {

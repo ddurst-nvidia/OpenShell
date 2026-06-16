@@ -164,6 +164,9 @@ fn json_rpc_config_from_proto(max_body_bytes: u32) -> Option<JsonRpcConfigDef> {
     (max_body_bytes > 0).then_some(JsonRpcConfigDef { max_body_bytes })
 }
 
+// MCP rides the same HTTP/JSON-RPC inspection machinery at runtime, but it
+// gets its own policy stanza so user-authored YAML can name the primary
+// protocol instead of treating MCP as generic JSON-RPC.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct McpConfigDef {
@@ -192,6 +195,8 @@ struct L7RuleDef {
     allow: L7AllowDef,
 }
 
+// Preserve the original `rules: [{ allow: ... }]` shape while accepting the
+// newer grouped shape (`rules.allow` / `rules.deny`) used by MCP examples.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 enum RulesDef {
@@ -206,6 +211,8 @@ impl Default for RulesDef {
 }
 
 impl RulesDef {
+    // Serde needs this for `skip_serializing_if`; keeping it on the enum keeps
+    // call sites from having to know which rules shape was parsed.
     fn is_empty(&self) -> bool {
         match self {
             Self::Legacy(rules) => rules.is_empty(),
@@ -213,6 +220,8 @@ impl RulesDef {
         }
     }
 
+    // The proto model still carries allow rules and deny rules separately. This
+    // folds both YAML spellings back into that stable internal representation.
     fn into_parts(self) -> (Vec<L7RuleDef>, Vec<L7DenyRuleDef>) {
         match self {
             Self::Legacy(rules) => (rules, Vec::new()),
@@ -267,10 +276,14 @@ struct L7AllowDef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 enum QueryMatcherDef {
+    // Short form: `query: { repo: "NVIDIA/*" }`.
     Glob(String),
+    // Expanded form: `query: { repo: { any: ["NVIDIA/*", "openai/*"] } }`.
     Any(QueryAnyDef),
 }
 
+// JSON-RPC/MCP params can be authored as nested maps in YAML, but the runtime
+// matcher map remains flat so the Rego policy can share query-param matching.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 enum ParamMatcherDef {
@@ -385,6 +398,8 @@ fn flat_params_to_def(
     params: BTreeMap<String, QueryMatcherDef>,
 ) -> BTreeMap<String, ParamMatcherDef> {
     let flat = params.into_iter().collect::<Vec<_>>();
+    // Generic JSON-RPC keeps the flat form because JSON-RPC does not define a
+    // conventional params object shape. MCP uses nested YAML for readability.
     if !is_mcp_protocol(protocol) {
         return flat_param_matchers_to_def(flat);
     }
@@ -433,6 +448,8 @@ fn insert_nested_param(
     insert_nested_param(children, &remainder, matcher)
 }
 
+// `mcp_method` is a YAML alias for `rpc_method`; both compile to the existing
+// proto field so older runtime policy evaluation stays compatible.
 fn method_from_aliases(rpc_method: String, mcp_method: String) -> String {
     if mcp_method.is_empty() {
         rpc_method
@@ -441,6 +458,8 @@ fn method_from_aliases(rpc_method: String, mcp_method: String) -> String {
     }
 }
 
+// MCP `tool` is a policy convenience for the standard `tools/call` params.name
+// field. It only fills the matcher when the caller did not set `params.name`.
 fn params_with_tool(
     mut params: BTreeMap<String, ParamMatcherDef>,
     tool: String,
@@ -496,6 +515,8 @@ fn deny_def_to_proto(deny: L7DenyRuleDef) -> L7DenyRule {
 }
 
 fn json_rpc_max_body_bytes(json_rpc: &Option<JsonRpcConfigDef>, mcp: &Option<McpConfigDef>) -> u32 {
+    // The proto has one JSON-RPC-family body limit. Prefer the MCP stanza when
+    // present because MCP policies should not need a shadow `json_rpc` block.
     mcp.as_ref().map_or_else(
         || json_rpc.as_ref().map_or(0, |config| config.max_body_bytes),
         |config| config.max_body_bytes,
@@ -510,6 +531,8 @@ fn split_tool_param(
     protocol: &str,
     params: BTreeMap<String, QueryMatcherDef>,
 ) -> (String, BTreeMap<String, QueryMatcherDef>) {
+    // Only MCP has the tool-name convention. Generic JSON-RPC keeps `name` as a
+    // normal params matcher so serialization does not invent MCP semantics.
     if !is_mcp_protocol(protocol) {
         return (String::new(), params);
     }
