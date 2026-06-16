@@ -2893,7 +2893,7 @@ network_policies:
         enforcement: enforce
         rules:
           - allow:
-              method: initialize
+              rpc_method: initialize
     binaries:
       - { path: /usr/bin/curl }
 "#;
@@ -2962,6 +2962,68 @@ network_policies:
     }
 
     #[test]
+    fn l7_mcp_receive_stream_get_is_allowed_for_matching_endpoint() {
+        let data = r#"
+network_policies:
+  mcp_stream:
+    name: mcp_stream
+    endpoints:
+      - host: mcp.stream.test
+        port: 8000
+        path: /mcp
+        protocol: mcp
+        enforcement: enforce
+        rules:
+          - allow:
+              method: initialize
+    binaries:
+      - { path: /usr/bin/curl }
+"#;
+        let engine = OpaEngine::from_strings(TEST_POLICY, data).expect("engine from yaml");
+        let allow_input = serde_json::json!({
+            "network": { "host": "mcp.stream.test", "port": 8000 },
+            "exec": {
+                "path": "/usr/bin/curl",
+                "ancestors": [],
+                "cmdline_paths": []
+            },
+            "request": {
+                "method": "GET",
+                "path": "/mcp",
+                "query_params": {},
+                "jsonrpc": {
+                    "method": null,
+                    "params": {},
+                    "receive_stream": true,
+                    "error": null
+                }
+            }
+        });
+        assert!(eval_l7(&engine, &allow_input));
+
+        let deny_input = serde_json::json!({
+            "network": { "host": "mcp.stream.test", "port": 8000 },
+            "exec": {
+                "path": "/usr/bin/curl",
+                "ancestors": [],
+                "cmdline_paths": []
+            },
+            "request": {
+                "method": "GET",
+                "path": "/other",
+                "query_params": {},
+                "jsonrpc": {
+                    "method": null,
+                    "params": {},
+                    "receive_stream": true,
+                    "error": null
+                }
+            }
+        });
+        assert!(!eval_l7(&engine, &deny_input));
+    }
+
+    #[test]
     fn l7_jsonrpc_response_post_is_denied_for_matching_endpoint() {
         let data = r#"
 network_policies:
@@ -2975,7 +3037,7 @@ network_policies:
         enforcement: enforce
         rules:
           - allow:
-              method: initialize
+              rpc_method: initialize
     binaries:
       - { path: /usr/bin/curl }
 "#;
@@ -3011,7 +3073,7 @@ network_policies:
         enforcement: enforce
         rules:
           - allow:
-              method: initialize
+              rpc_method: initialize
     binaries:
       - { path: /usr/bin/curl }
 "#;
@@ -3044,9 +3106,9 @@ network_policies:
         enforcement: enforce
         rules:
           - allow:
-              method: initialize
+              rpc_method: initialize
         deny_rules:
-          - method: tools/delete
+          - rpc_method: tools/delete
     binaries:
       - { path: /usr/bin/curl }
 "#;
@@ -3089,16 +3151,16 @@ network_policies:
         enforcement: enforce
         rules:
           - allow:
-              method: tools/call
+              rpc_method: tools/call
               params:
                 name: read_status
           - allow:
-              method: tools/call
+              rpc_method: tools/call
               params:
                 name: submit_report
                 arguments.scope: workspace/main
         deny_rules:
-          - method: tools/call
+          - rpc_method: tools/call
             params:
               name: blocked_action
     binaries:

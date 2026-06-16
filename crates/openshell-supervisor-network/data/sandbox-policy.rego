@@ -257,7 +257,7 @@ deny_request if {
 # --- L7 deny rule matching: REST method + path + query ---
 
 request_denied_for_endpoint(request, endpoint) if {
-	object.get(endpoint, "protocol", "") != "json-rpc"
+	not jsonrpc_family_endpoint(endpoint)
 	some deny_rule
 	deny_rule := endpoint.deny_rules[_]
 	deny_rule.method
@@ -278,16 +278,16 @@ request_denied_for_endpoint(request, endpoint) if {
 # --- L7 deny rule matching: JSON-RPC method + params ---
 
 request_denied_for_endpoint(request, endpoint) if {
-	endpoint.protocol == "json-rpc"
+	jsonrpc_family_endpoint(endpoint)
 	request.method == "POST"
 	some deny_rule
 	deny_rule := endpoint.deny_rules[_]
-	deny_rule.method
+	deny_rule.rpc_method
 	jsonrpc_rule_matches(request, deny_rule)
 }
 
 request_denied_for_endpoint(request, endpoint) if {
-	endpoint.protocol == "json-rpc"
+	jsonrpc_family_endpoint(endpoint)
 	request.method == "POST"
 	jsonrpc_response_frame_present(request)
 }
@@ -426,7 +426,7 @@ request_deny_reason := reason if {
 # --- L7 rule matching: REST method + path ---
 
 request_allowed_for_endpoint(request, endpoint) if {
-	object.get(endpoint, "protocol", "") != "json-rpc"
+	not jsonrpc_family_endpoint(endpoint)
 	some rule
 	rule := endpoint.rules[_]
 	rule.allow.method
@@ -447,20 +447,29 @@ request_allowed_for_endpoint(request, endpoint) if {
 # --- L7 rule matching: JSON-RPC method ---
 
 request_allowed_for_endpoint(request, endpoint) if {
-	endpoint.protocol == "json-rpc"
+	jsonrpc_family_endpoint(endpoint)
 	request.method == "POST"
 	some rule
 	rule := endpoint.rules[_]
-	rule.allow.method
+	rule.allow.rpc_method
 	not jsonrpc_response_frame_present(request)
 	jsonrpc_rule_matches(request, rule.allow)
 }
 
-# MCP Streamable HTTP uses GET on the JSON-RPC endpoint as a receive stream for
-# server-to-client messages. The stream itself has no client-to-server JSON-RPC
-# request body to inspect; allow it once the endpoint path and binary matched.
-request_allowed_for_endpoint(request, endpoint) if {
+jsonrpc_family_endpoint(endpoint) if {
 	endpoint.protocol == "json-rpc"
+}
+
+jsonrpc_family_endpoint(endpoint) if {
+	endpoint.protocol == "mcp"
+}
+
+# MCP Streamable HTTP uses GET on the JSON-RPC-family endpoint as a receive
+# stream for server-to-client messages. The stream itself has no
+# client-to-server JSON-RPC request body to inspect; allow it once the endpoint
+# path and binary matched.
+request_allowed_for_endpoint(request, endpoint) if {
+	jsonrpc_family_endpoint(endpoint)
 	request.method == "GET"
 	is_object(request.jsonrpc)
 	object.get(request.jsonrpc, "receive_stream", false)

@@ -313,31 +313,37 @@ where
             None
         };
         let jsonrpc_info = if config.protocol.is_jsonrpc_family() {
-            match crate::l7::http::read_body_for_inspection(
-                client,
-                &mut req,
-                config.json_rpc_max_body_bytes,
-            )
-            .await
-            {
-                Ok(body) => Some(crate::l7::jsonrpc::parse_jsonrpc_body_with_mode(
-                    &body,
-                    jsonrpc_inspection_mode(config.protocol),
-                )),
-                Err(e) => {
-                    if is_benign_connection_error(&e) {
-                        debug!(
-                            host = %ctx.host,
-                            port = ctx.port,
-                            error = %e,
-                            "JSON-RPC L7 connection closed"
-                        );
-                    } else {
-                        let detail =
-                            parse_rejection_detail(&e.to_string(), ParseRejectionMode::L7Endpoint);
-                        emit_parse_rejection(ctx, &detail, "l7-jsonrpc");
+            if crate::l7::jsonrpc::jsonrpc_receive_stream_request(&req) {
+                Some(crate::l7::jsonrpc::JsonRpcRequestInfo::receive_stream())
+            } else {
+                match crate::l7::http::read_body_for_inspection(
+                    client,
+                    &mut req,
+                    config.json_rpc_max_body_bytes,
+                )
+                .await
+                {
+                    Ok(body) => Some(crate::l7::jsonrpc::parse_jsonrpc_body_with_mode(
+                        &body,
+                        jsonrpc_inspection_mode(config.protocol),
+                    )),
+                    Err(e) => {
+                        if is_benign_connection_error(&e) {
+                            debug!(
+                                host = %ctx.host,
+                                port = ctx.port,
+                                error = %e,
+                                "JSON-RPC L7 connection closed"
+                            );
+                        } else {
+                            let detail = parse_rejection_detail(
+                                &e.to_string(),
+                                ParseRejectionMode::L7Endpoint,
+                            );
+                            emit_parse_rejection(ctx, &detail, "l7-jsonrpc");
+                        }
+                        return Ok(());
                     }
-                    return Ok(());
                 }
             }
         } else {
