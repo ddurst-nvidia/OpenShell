@@ -8,6 +8,9 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tower_mcp_types::protocol::{
+    JSONRPC_VERSION, JsonRpcNotification, JsonRpcRequest, McpNotification, McpRequest,
+};
 
 use crate::l7::provider::{L7Provider, L7Request};
 
@@ -193,7 +196,7 @@ fn parse_jsonrpc_message(
         .get("jsonrpc")
         .and_then(|v| v.as_str())
         .ok_or_else(|| "missing or non-string 'jsonrpc' field".to_string())?;
-    if version != "2.0" {
+    if version != JSONRPC_VERSION {
         return Err(format!("unsupported JSON-RPC version '{version}'"));
     }
 
@@ -213,17 +216,16 @@ fn parse_jsonrpc_call(
     value: &serde_json::Value,
     inspection_mode: JsonRpcInspectionMode,
 ) -> std::result::Result<JsonRpcCallInfo, String> {
+    if inspection_mode == JsonRpcInspectionMode::Mcp {
+        return parse_mcp_call(value);
+    }
+
     let method = value
         .get("method")
         .and_then(|m| m.as_str())
         .ok_or_else(|| "missing or non-string 'method' field".to_string())?;
-    let params = value
-        .get("params")
-        .map_or_else(|| Ok(HashMap::new()), flatten_jsonrpc_params)?;
+    let params = flatten_jsonrpc_params_opt(value.get("params"))?;
     let tool = params.get("name").cloned();
-    if inspection_mode == JsonRpcInspectionMode::Mcp {
-        validate_mcp_call(value)?;
-    }
     Ok(JsonRpcCallInfo {
         method: method.to_string(),
         params,
@@ -260,24 +262,39 @@ fn parse_jsonrpc_response(value: &serde_json::Value) -> std::result::Result<(), 
     Ok(())
 }
 
-fn validate_mcp_call(value: &serde_json::Value) -> std::result::Result<(), String> {
+fn parse_mcp_call(value: &serde_json::Value) -> std::result::Result<JsonRpcCallInfo, String> {
     if value.get("id").is_some() {
-        let request: tower_mcp_types::protocol::JsonRpcRequest =
-            serde_json::from_value(value.clone())
-                .map_err(|error| format!("invalid MCP request: {error}"))?;
+        let request: JsonRpcRequest = serde_json::from_value(value.clone())
+            .map_err(|error| format!("invalid MCP request: {error}"))?;
         request
             .validate()
             .map_err(|error| format!("invalid MCP request: {error:?}"))?;
-        tower_mcp_types::protocol::McpRequest::from_jsonrpc(&request)
+        let mcp_request = McpRequest::from_jsonrpc(&request)
             .map_err(|error| format!("invalid MCP request params: {error}"))?;
+
+        return Ok(JsonRpcCallInfo {
+            method: mcp_request.method_name().to_string(),
+            params: flatten_jsonrpc_params_opt(request.params.as_ref())?,
+            tool: mcp_tool_name(&mcp_request),
+        });
     } else {
-        let notification: tower_mcp_types::protocol::JsonRpcNotification =
-            serde_json::from_value(value.clone())
-                .map_err(|error| format!("invalid MCP notification: {error}"))?;
-        tower_mcp_types::protocol::McpNotification::from_jsonrpc(&notification)
+        let notification: JsonRpcNotification = serde_json::from_value(value.clone())
+            .map_err(|error| format!("invalid MCP notification: {error}"))?;
+        if notification.jsonrpc != JSONRPC_VERSION {
+            return Err(format!(
+                "unsupported JSON-RPC version '{}'",
+                notification.jsonrpc
+            ));
+        }
+        McpNotification::from_jsonrpc(&notification)
             .map_err(|error| format!("invalid MCP notification params: {error}"))?;
+
+        return Ok(JsonRpcCallInfo {
+            method: notification.method,
+            params: flatten_jsonrpc_params_opt(notification.params.as_ref())?,
+            tool: None,
+        });
     }
-    Ok(())
 }
 
 fn flatten_jsonrpc_params(
@@ -286,6 +303,20 @@ fn flatten_jsonrpc_params(
     let mut params = HashMap::new();
     flatten_json_value("", value, &mut params)?;
     Ok(params)
+}
+
+fn flatten_jsonrpc_params_opt(
+    value: Option<&serde_json::Value>,
+) -> std::result::Result<HashMap<String, String>, String> {
+    value.map_or_else(|| Ok(HashMap::new()), flatten_jsonrpc_params)
+}
+
+fn mcp_tool_name(request: &McpRequest) -> Option<String> {
+    if let McpRequest::CallTool(params) = request {
+        Some(params.name.clone())
+    } else {
+        None
+    }
 }
 
 fn canonical_params_map(params: &HashMap<String, String>) -> BTreeMap<String, String> {
