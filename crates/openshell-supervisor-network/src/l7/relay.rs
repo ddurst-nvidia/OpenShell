@@ -1390,6 +1390,7 @@ fn evaluate_jsonrpc_l7_request_for_log(
             log_info: crate::l7::jsonrpc::JsonRpcRequestInfo {
                 calls: denied_calls,
                 is_batch: true,
+                has_response: false,
                 error: None,
             },
         });
@@ -1411,6 +1412,7 @@ fn jsonrpc_request_for_call(
     item_request.jsonrpc = Some(crate::l7::jsonrpc::JsonRpcRequestInfo {
         calls: vec![call.clone()],
         is_batch: false,
+        has_response: false,
         error: None,
     });
     item_request
@@ -1449,6 +1451,7 @@ fn evaluate_l7_request_once(
                 serde_json::json!({
                     "method": call.map(|call| call.method.as_str()),
                     "params": call.map(|call| call.params.clone()).unwrap_or_default(),
+                    "has_response": j.has_response,
                     "error": j.error,
                 })
             }),
