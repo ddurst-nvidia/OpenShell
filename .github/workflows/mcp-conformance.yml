@@ -17,6 +17,11 @@ on:
         required: false
         type: string
         default: ""
+      ci-image:
+        description: "CI container image"
+        required: false
+        type: string
+        default: "ghcr.io/nvidia/openshell/ci:latest"
 
 permissions:
   contents: read
@@ -30,36 +35,35 @@ jobs:
     defaults:
       run:
         shell: bash
-    container:
-      image: ghcr.io/nvidia/openshell/ci:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-      options: --privileged
-      volumes:
-        - /var/run/docker.sock:/var/run/docker.sock
-        - /home/runner/_work:/home/runner/_work
     env:
-      MISE_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       IMAGE_TAG: ${{ inputs.image-tag }}
-      OPENSHELL_REGISTRY: ghcr.io/nvidia/openshell
+      OPENSHELL_REGISTRY: ${{ format('ghcr.io/{0}/openshell', github.repository_owner == 'NVIDIA' && 'nvidia' || github.repository_owner) }}
       OPENSHELL_REGISTRY_HOST: ghcr.io
-      OPENSHELL_REGISTRY_NAMESPACE: nvidia/openshell
-      OPENSHELL_REGISTRY_USERNAME: ${{ github.actor }}
-      OPENSHELL_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-      OPENSHELL_SUPERVISOR_IMAGE: ${{ format('ghcr.io/nvidia/openshell/supervisor:{0}', inputs.image-tag) }}
+      OPENSHELL_REGISTRY_NAMESPACE: ${{ format('{0}/openshell', github.repository_owner == 'NVIDIA' && 'nvidia' || github.repository_owner) }}
+      OPENSHELL_SUPERVISOR_IMAGE: ${{ format('ghcr.io/{0}/openshell/supervisor:{1}', github.repository_owner == 'NVIDIA' && 'nvidia' || github.repository_owner, inputs.image-tag) }}
       OPENSHELL_MCP_CONFORMANCE_CLIENT_IMAGE: openshell-mcp-conformance-client:${{ github.sha }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ inputs['checkout-ref'] || github.sha }}
+          persist-credentials: false
+
+      - name: Install mise
+        run: |
+          curl https://mise.run | MISE_VERSION=v2026.4.25 sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.local/share/mise/shims" >> "$GITHUB_PATH"
+
+      - name: Install tools
+        run: mise install --locked
 
       - name: Check out MCP conformance tests
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           repository: modelcontextprotocol/conformance
-          ref: v0.1.16
+          ref: 21a9a2febd7100d7c17ac1021ee7f2ed9f66a1e0 # v0.1.16
           path: .cache/mcp-conformance
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
@@ -75,7 +79,9 @@ jobs:
           npm run build
 
       - name: Log in to GHCR with Docker
-        run: echo "${OPENSHELL_REGISTRY_PASSWORD}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       - name: Build OpenShell e2e binaries
         run: |

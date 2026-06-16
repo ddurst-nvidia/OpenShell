@@ -51,6 +51,11 @@ on:
         required: false
         type: string
         default: ""
+      runner:
+        description: "GitHub Actions runner label"
+        required: false
+        type: string
+        default: ""
 permissions:
   contents: read
   packages: read
@@ -70,7 +75,7 @@ defaults:
 jobs:
   rust-native-build:
     name: ${{ inputs.component }} (${{ inputs.arch }})
-    runs-on: ${{ inputs.arch == 'arm64' && 'linux-arm64-cpu8' || 'linux-amd64-cpu8' }}
+    runs-on: ${{ inputs.runner || (inputs.arch == 'arm64' && 'linux-arm64-cpu8' || 'linux-amd64-cpu8') }}
     timeout-minutes: 60
     env:
       COMPONENT: ${{ inputs.component }}
@@ -80,11 +85,6 @@ jobs:
       # concurrent jobs collide on the same cache key and later-starting
       # writers hit 409 Conflict.
       SCCACHE_GHA_VERSION: ${{ inputs.component }}-${{ inputs.arch }}
-    container:
-      image: ghcr.io/nvidia/openshell/ci:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -96,6 +96,12 @@ jobs:
 
       - name: Fetch tags
         run: git fetch --tags --force
+
+      - name: Install mise
+        run: |
+          curl https://mise.run | MISE_VERSION=v2026.4.25 sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.local/share/mise/shims" >> "$GITHUB_PATH"
 
       - name: Configure GHA sccache backend
         # Exposes ACTIONS_CACHE_URL / ACTIONS_RUNTIME_TOKEN before `mise install`

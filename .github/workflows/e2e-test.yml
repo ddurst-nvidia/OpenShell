@@ -56,9 +56,9 @@ jobs:
     env:
       MISE_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       IMAGE_TAG: ${{ inputs.image-tag }}
-      OPENSHELL_REGISTRY: ghcr.io/nvidia/openshell
+      OPENSHELL_REGISTRY: ${{ format('ghcr.io/{0}/openshell', github.repository_owner == 'NVIDIA' && 'nvidia' || github.repository_owner) }}
       OPENSHELL_REGISTRY_HOST: ghcr.io
-      OPENSHELL_REGISTRY_NAMESPACE: nvidia/openshell
+      OPENSHELL_REGISTRY_NAMESPACE: ${{ format('{0}/openshell', github.repository_owner == 'NVIDIA' && 'nvidia' || github.repository_owner) }}
       OPENSHELL_REGISTRY_USERNAME: ${{ github.actor }}
       OPENSHELL_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -103,7 +103,7 @@ jobs:
 
       - name: Run tests
         env:
-          OPENSHELL_SUPERVISOR_IMAGE: ${{ format('ghcr.io/nvidia/openshell/supervisor:{0}', inputs.image-tag) }}
+          OPENSHELL_SUPERVISOR_IMAGE: ${{ format('ghcr.io/{0}/openshell/supervisor:{1}', github.repository_owner == 'NVIDIA' && 'nvidia' || github.repository_owner, inputs.image-tag) }}
           E2E_CMD: ${{ matrix.cmd }}
         run: |
           if [ "${{ matrix.rootless }}" = "true" ]; then
