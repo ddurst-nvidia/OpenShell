@@ -1,23 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Add client scenarios here when enabling broader MCP conformance suites.
-#
-# elicitation-sep1034-client-defaults is allowed because the pinned upstream
-# TypeScript conformance client appears to advertise the wrong SDK capability
-# shape for default application: it sets elicitation.applyDefaults, while
-# @modelcontextprotocol/sdk 1.29.0 applies defaults only when
-# elicitation.form.applyDefaults is true. Reproduce without OpenShell in the
-# path from .cache/mcp-conformance after npm install/build:
-# Remove this entry when OPENSHELL_MCP_CONFORMANCE_REF is bumped to an upstream
-# conformance commit where the bundled client advertises
-# elicitation.form.applyDefaults.
-#
-#   node dist/index.js client \
-#     --command "env MCP_CONFORMANCE_SCENARIO=elicitation-defaults \
-#       ./node_modules/.bin/tsx examples/clients/typescript/everything-client.ts" \
-#     --scenario elicitation-sep1034-client-defaults \
-#     --spec-version 2025-11-25
-client:
-  - elicitation-sep1034-client-defaults
+# Add scenarios here only for known OpenShell MCP conformance gaps.
+# Upstream reference-client fixture drift is handled by the local wrapper and
+# checkout patching in e2e/mcp-conformance.sh so it does not hide OpenShell
+# regressions behind expected failures.
+client: []
 server: []

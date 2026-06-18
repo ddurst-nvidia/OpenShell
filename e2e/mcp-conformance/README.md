@@ -45,10 +45,16 @@ For local runs, build or stage a static supervisor binary and pass it with
 `OPENSHELL_DOCKER_SUPERVISOR_BIN` if the default local supervisor build is
 linked against a newer glibc than the conformance client image provides.
 
-The upstream `everything-client` has a few handler names that do not line up
-with released-spec scenario names. The wrapper maps those names when forwarding
-`MCP_CONFORMANCE_SCENARIO` into the sandbox, but it does not patch the upstream
-checkout.
+The pinned upstream checkout includes reference-client fixture drift that is
+tracked in `modelcontextprotocol/conformance#345`. The wrapper patches the
+checkout before building the client image so the bundled TypeScript client
+advertises `elicitation.form.applyDefaults` and accepts the canonical
+`elicitation-sep1034-client-defaults` scenario. It also routes `sse-retry` to
+the upstream standalone `sse-retry-test.ts` client so the reconnect timing path
+is exercised instead of aliasing it to another scenario.
+
+Remove those local workarounds when `OPENSHELL_MCP_CONFORMANCE_REF` points at
+an upstream release that includes the `#345` fixes.
 
 When enabling broader upstream suites, add scenarios that OpenShell does not yet
 support through the MCP proxy to `expected-failures.yml`. The upstream
