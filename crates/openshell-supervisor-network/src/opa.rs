@@ -1188,18 +1188,20 @@ fn proto_to_opa_data_json(proto: &ProtoSandboxPolicy, entrypoint_pid: u32) -> St
                         ep["access"] = e.access.clone().into();
                     }
                     if !e.rules.is_empty() {
+                        let jsonrpc_family =
+                            matches!(e.protocol.as_str(), "json-rpc" | "mcp");
                         let rules: Vec<serde_json::Value> = e
                             .rules
                             .iter()
                             .map(|r| {
                                 let a = r.allow.as_ref();
                                 let mut allow = serde_json::json!({
-                                    "method": a.map_or("", |a| &a.method),
+                                    "method": if jsonrpc_family { "" } else { a.map_or("", |a| &a.method) },
                                     "path": a.map_or("", |a| &a.path),
                                     "command": a.map_or("", |a| &a.command),
                                     "operation_type": a.map_or("", |a| &a.operation_type),
                                     "operation_name": a.map_or("", |a| &a.operation_name),
-                                    "rpc_method": a.map_or("", |a| &a.rpc_method),
+                                    "rpc_method": if jsonrpc_family { a.map_or("", |a| &a.method) } else { "" },
                                 });
                                 if let Some(a) = a
                                     && !a.fields.is_empty()
@@ -1230,12 +1232,16 @@ fn proto_to_opa_data_json(proto: &ProtoSandboxPolicy, entrypoint_pid: u32) -> St
                         ep["advisor_proposed"] = true.into();
                     }
                     if !e.deny_rules.is_empty() {
+                        let jsonrpc_family =
+                            matches!(e.protocol.as_str(), "json-rpc" | "mcp");
                         let deny_rules: Vec<serde_json::Value> = e
                             .deny_rules
                             .iter()
                             .map(|d| {
                                 let mut deny = serde_json::json!({});
-                                if !d.method.is_empty() {
+                                if jsonrpc_family && !d.method.is_empty() {
+                                    deny["rpc_method"] = d.method.clone().into();
+                                } else if !d.method.is_empty() {
                                     deny["method"] = d.method.clone().into();
                                 }
                                 if !d.path.is_empty() {
@@ -1252,9 +1258,6 @@ fn proto_to_opa_data_json(proto: &ProtoSandboxPolicy, entrypoint_pid: u32) -> St
                                 }
                                 if !d.fields.is_empty() {
                                     deny["fields"] = d.fields.clone().into();
-                                }
-                                if !d.rpc_method.is_empty() {
-                                    deny["rpc_method"] = d.rpc_method.clone().into();
                                 }
                                 let query = l7_matchers_to_json(&d.query);
                                 if !query.is_empty() {

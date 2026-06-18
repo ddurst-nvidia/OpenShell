@@ -108,8 +108,8 @@ struct NetworkEndpointDef {
     enforcement: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     access: String,
-    #[serde(default, skip_serializing_if = "RulesDef::is_empty")]
-    rules: RulesDef,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    rules: Vec<L7RuleDef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     allowed_ips: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -193,57 +193,6 @@ struct GraphqlOperationDef {
 #[serde(deny_unknown_fields)]
 struct L7RuleDef {
     allow: L7AllowDef,
-}
-
-// Preserve the original `rules: [{ allow: ... }]` shape while accepting the
-// newer grouped shape (`rules.allow` / `rules.deny`) used by MCP examples.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(untagged)]
-enum RulesDef {
-    Legacy(Vec<L7RuleDef>),
-    Grouped(L7RuleGroupsDef),
-}
-
-impl Default for RulesDef {
-    fn default() -> Self {
-        Self::Legacy(Vec::new())
-    }
-}
-
-impl RulesDef {
-    // Serde needs this for `skip_serializing_if`; keeping it on the enum keeps
-    // call sites from having to know which rules shape was parsed.
-    fn is_empty(&self) -> bool {
-        match self {
-            Self::Legacy(rules) => rules.is_empty(),
-            Self::Grouped(groups) => groups.allow.is_empty() && groups.deny.is_empty(),
-        }
-    }
-
-    // The proto model still carries allow rules and deny rules separately. This
-    // folds both YAML spellings back into that stable internal representation.
-    fn into_parts(self) -> (Vec<L7RuleDef>, Vec<L7DenyRuleDef>) {
-        match self {
-            Self::Legacy(rules) => (rules, Vec::new()),
-            Self::Grouped(groups) => (
-                groups
-                    .allow
-                    .into_iter()
-                    .map(|allow| L7RuleDef { allow })
-                    .collect(),
-                groups.deny,
-            ),
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct L7RuleGroupsDef {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    allow: Vec<L7AllowDef>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    deny: Vec<L7DenyRuleDef>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -459,15 +408,14 @@ fn params_with_tool(
 }
 
 fn allow_def_to_proto(protocol: &str, allow: L7AllowDef) -> L7Allow {
-    let (method, rpc_method) = if is_mcp_protocol(protocol) {
-        let rpc_method = if allow.method.is_empty() {
+    let method = if is_jsonrpc_family_protocol(protocol) {
+        if allow.method.is_empty() {
             allow.rpc_method
         } else {
             allow.method
-        };
-        (String::new(), rpc_method)
+        }
     } else {
-        (allow.method, allow.rpc_method)
+        allow.method
     };
 
     L7Allow {
@@ -477,7 +425,6 @@ fn allow_def_to_proto(protocol: &str, allow: L7AllowDef) -> L7Allow {
         operation_type: allow.operation_type,
         operation_name: allow.operation_name,
         fields: allow.fields,
-        rpc_method,
         query: allow
             .query
             .into_iter()
@@ -491,15 +438,14 @@ fn allow_def_to_proto(protocol: &str, allow: L7AllowDef) -> L7Allow {
 }
 
 fn deny_def_to_proto(protocol: &str, deny: L7DenyRuleDef) -> L7DenyRule {
-    let (method, rpc_method) = if is_mcp_protocol(protocol) {
-        let rpc_method = if deny.method.is_empty() {
+    let method = if is_jsonrpc_family_protocol(protocol) {
+        if deny.method.is_empty() {
             deny.rpc_method
         } else {
             deny.method
-        };
-        (String::new(), rpc_method)
+        }
     } else {
-        (deny.method, deny.rpc_method)
+        deny.method
     };
 
     L7DenyRule {
@@ -509,7 +455,6 @@ fn deny_def_to_proto(protocol: &str, deny: L7DenyRuleDef) -> L7DenyRule {
         operation_type: deny.operation_type,
         operation_name: deny.operation_name,
         fields: deny.fields,
-        rpc_method,
         query: deny
             .query
             .into_iter()
@@ -533,6 +478,14 @@ fn json_rpc_max_body_bytes(json_rpc: &Option<JsonRpcConfigDef>, mcp: &Option<Mcp
 
 fn is_mcp_protocol(protocol: &str) -> bool {
     protocol.eq_ignore_ascii_case("mcp")
+}
+
+fn is_jsonrpc_protocol(protocol: &str) -> bool {
+    protocol.eq_ignore_ascii_case("json-rpc")
+}
+
+fn is_jsonrpc_family_protocol(protocol: &str) -> bool {
+    is_mcp_protocol(protocol) || is_jsonrpc_protocol(protocol)
 }
 
 fn split_tool_param(
@@ -566,9 +519,11 @@ fn allow_proto_to_def(protocol: &str, allow: L7Allow) -> L7AllowDef {
     let (tool, params) = split_tool_param(protocol, params);
     let params = flat_params_to_def(protocol, params);
     let (method, rpc_method) = if is_mcp_protocol(protocol) {
-        (allow.rpc_method, String::new())
+        (allow.method, String::new())
+    } else if is_jsonrpc_protocol(protocol) {
+        (String::new(), allow.method)
     } else {
-        (allow.method, allow.rpc_method)
+        (allow.method, String::new())
     };
     L7AllowDef {
         method,
@@ -597,9 +552,11 @@ fn deny_proto_to_def(protocol: &str, deny: &L7DenyRule) -> L7DenyRuleDef {
     let (tool, params) = split_tool_param(protocol, params);
     let params = flat_params_to_def(protocol, params);
     let (method, rpc_method) = if is_mcp_protocol(protocol) {
-        (deny.rpc_method.clone(), String::new())
+        (deny.method.clone(), String::new())
+    } else if is_jsonrpc_protocol(protocol) {
+        (String::new(), deny.method.clone())
     } else {
-        (deny.method.clone(), deny.rpc_method.clone())
+        (deny.method.clone(), String::new())
     };
     L7DenyRuleDef {
         method,
@@ -635,9 +592,8 @@ fn to_proto(raw: PolicyFile) -> SandboxPolicy {
                     .into_iter()
                     .map(|e| {
                         let protocol = e.protocol;
-                        let (allow_rules, grouped_deny_rules) = e.rules.into_parts();
-                        let mut deny_rules = grouped_deny_rules;
-                        deny_rules.extend(e.deny_rules);
+                        let allow_rules = e.rules;
+                        let deny_rules = e.deny_rules;
                         // Normalize port/ports: ports takes precedence, else
                         // single port is promoted to ports array.
                         let normalized_ports: Vec<u32> = if !e.ports.is_empty() {
@@ -770,39 +726,21 @@ fn from_proto(policy: &SandboxPolicy) -> PolicyFile {
                             (clamp(e.ports.first().copied().unwrap_or(e.port)), vec![])
                         };
                         let protocol = e.protocol.clone();
-                        let allow_defs: Vec<L7AllowDef> = e
+                        let rules = e
                             .rules
                             .iter()
-                            .map(|r| {
-                                allow_proto_to_def(&protocol, r.allow.clone().unwrap_or_default())
+                            .map(|r| L7RuleDef {
+                                allow: allow_proto_to_def(
+                                    &protocol,
+                                    r.allow.clone().unwrap_or_default(),
+                                ),
                             })
                             .collect();
-                        let deny_defs: Vec<L7DenyRuleDef> = e
+                        let deny_rules: Vec<L7DenyRuleDef> = e
                             .deny_rules
                             .iter()
                             .map(|d| deny_proto_to_def(&protocol, d))
                             .collect();
-                        let (rules, deny_rules) = if is_mcp_protocol(&protocol)
-                            && (!allow_defs.is_empty() || !deny_defs.is_empty())
-                        {
-                            (
-                                RulesDef::Grouped(L7RuleGroupsDef {
-                                    allow: allow_defs,
-                                    deny: deny_defs,
-                                }),
-                                Vec::new(),
-                            )
-                        } else {
-                            (
-                                RulesDef::Legacy(
-                                    allow_defs
-                                        .into_iter()
-                                        .map(|allow| L7RuleDef { allow })
-                                        .collect(),
-                                ),
-                                deny_defs,
-                            )
-                        };
                         let (json_rpc, mcp) = if is_mcp_protocol(&protocol) {
                             (None, mcp_config_from_proto(e.json_rpc_max_body_bytes))
                         } else {
@@ -2058,7 +1996,7 @@ network_policies:
     }
 
     #[test]
-    fn parse_grouped_mcp_rules_to_runtime_fields() {
+    fn parse_mcp_rules_to_runtime_fields() {
         let yaml = r"
 version: 1
 network_policies:
@@ -2073,17 +2011,19 @@ network_policies:
         mcp:
           max_body_bytes: 131072
         rules:
-          deny:
-            - method: tools/call
-              tool: send_email
-          allow:
-            - method: initialize
-            - method: tools/list
-            - method: tools/call
+          - allow:
+              method: initialize
+          - allow:
+              method: tools/list
+          - allow:
+              method: tools/call
               tool: search_web
               params:
                 arguments:
                   repository: NVIDIA/OpenShell
+        deny_rules:
+          - method: tools/call
+            tool: send_email
     binaries:
       - path: /usr/bin/curl
 ";
@@ -2093,7 +2033,7 @@ network_policies:
         assert_eq!(ep.protocol, "mcp");
         assert_eq!(ep.json_rpc_max_body_bytes, 131_072);
         assert_eq!(ep.rules.len(), 3);
-        assert_eq!(ep.rules[2].allow.as_ref().unwrap().rpc_method, "tools/call");
+        assert_eq!(ep.rules[2].allow.as_ref().unwrap().method, "tools/call");
         assert_eq!(
             ep.rules[2].allow.as_ref().unwrap().params["name"].glob,
             "search_web"
@@ -2103,7 +2043,7 @@ network_policies:
             "NVIDIA/OpenShell"
         );
         assert_eq!(ep.deny_rules.len(), 1);
-        assert_eq!(ep.deny_rules[0].rpc_method, "tools/call");
+        assert_eq!(ep.deny_rules[0].method, "tools/call");
         assert_eq!(ep.deny_rules[0].params["name"].glob, "send_email");
     }
 
@@ -2121,15 +2061,15 @@ network_policies:
         mcp:
           max_body_bytes: 131072
         rules:
-          allow:
-            - method: tools/call
+          - allow:
+              method: tools/call
               tool: search_web
               params:
                 arguments:
                   repository: NVIDIA/OpenShell
-          deny:
-            - method: tools/call
-              tool: send_email
+        deny_rules:
+          - method: tools/call
+            tool: send_email
     binaries:
       - path: /usr/bin/curl
 ";
@@ -2141,6 +2081,7 @@ network_policies:
         assert!(yaml_out.contains("method: tools/call"));
         assert!(yaml_out.contains("tool: search_web"));
         assert!(yaml_out.contains("tool: send_email"));
+        assert!(yaml_out.contains("deny_rules:"));
         assert!(yaml_out.contains("arguments:"));
         assert!(yaml_out.contains("repository: NVIDIA/OpenShell"));
         assert!(!yaml_out.contains("arguments.repository"));

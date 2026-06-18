@@ -140,6 +140,7 @@ fn engine_type_for_protocol(protocol: L7Protocol) -> &'static str {
     match protocol {
         L7Protocol::Graphql => "l7-graphql",
         L7Protocol::JsonRpc => "l7-jsonrpc",
+        L7Protocol::Mcp => "l7-mcp",
         L7Protocol::Websocket => "l7-websocket",
         L7Protocol::Rest | L7Protocol::Sql => "l7",
     }
@@ -567,7 +568,7 @@ fn l7_protocol_log_summary(
     if let Some(info) = jsonrpc_info {
         return format!(
             " rpc_methods={} params_sha256={}",
-            jsonrpc_methods_for_log(info),
+            rule_method_names_for_log(info),
             info.params_sha256()
                 .unwrap_or_else(|| "<empty>".to_string())
         );
@@ -2457,14 +2458,16 @@ network_policies:
         mcp:
           max_body_bytes: 131072
         rules:
-          deny:
-            - method: tools/call
-              tool: delete_resource
-          allow:
-            - method: initialize
-            - method: tools/list
-            - method: tools/call
+          - allow:
+              method: initialize
+          - allow:
+              method: tools/list
+          - allow:
+              method: tools/call
               tool: read_status
+        deny_rules:
+          - method: tools/call
+            tool: delete_resource
     binaries:
       - { path: /usr/bin/node }
 "#;

@@ -159,7 +159,7 @@ Each endpoint defines a reachable destination and optional inspection rules.
 | `tls` | string | No | TLS handling mode. The proxy auto-detects TLS by peeking the first bytes of each connection and terminates it for inspected HTTPS traffic, so this field is optional in most cases. Set to `skip` to disable auto-detection for edge cases such as client-certificate mTLS or non-standard protocols. The values `terminate` and `passthrough` are deprecated and log a warning; they are still accepted for backward compatibility but have no effect on behavior. |
 | `enforcement` | string | No | `enforce` actively blocks disallowed requests. `audit` logs violations but allows traffic through. |
 | `access` | string | No | Access preset. One of `read-only`, `read-write`, or `full`. Mutually exclusive with `rules`. Not valid on `protocol: mcp` or `protocol: json-rpc`; those endpoints must use explicit rules. |
-| `rules` | list of rule objects | No | Fine-grained protocol-specific allow rules. Mutually exclusive with `access`. |
+| `rules` | list of allow rule objects | No | Fine-grained protocol-specific allow rules. Mutually exclusive with `access`. |
 | `deny_rules` | list of deny rule objects | No | L7 deny rules that block specific requests even when allowed by `access` or `rules`. Deny rules take precedence over allow rules. |
 | `allowed_ips` | list of string | No | CIDR or IP allowlist for SSRF override. Exact user-declared hostname endpoints may resolve to RFC 1918 private addresses without this field, but wildcard, hostless, and policy-advisor-proposed endpoints still require `allowed_ips` for private resolved IPs. Entries overlapping loopback (`127.0.0.0/8`), link-local (`169.254.0.0/16`), or unspecified (`0.0.0.0`) are rejected at load time. |
 | `allow_encoded_slash` | bool | No | When `true`, L7 request parsing preserves `%2F` inside path segments instead of rejecting it. Use this for registries and APIs such as npm scoped packages (`/@scope%2Fname`). Defaults to `false`. |
@@ -282,7 +282,7 @@ Do not combine `method`, `path`, or `query` with `operation_type`, `operation_na
 
 MCP rules match sandbox-to-server MCP Streamable HTTP request bodies by MCP method and optional tool or params selectors. OpenShell parses the underlying JSON-RPC 2.0 envelope, validates known MCP request and notification params, and preserves unknown extension methods as policy-addressable method strings. JSON-RPC responses and server-to-client MCP messages on response bodies or SSE streams are relayed but are not currently parsed for policy enforcement.
 
-Deny rules take precedence over allow rules. In a batch request, one denied call denies the full batch.
+Use `rules` for MCP allow rules and `deny_rules` for MCP deny rules. Deny rules take precedence over allow rules. In a batch request, one denied call denies the full batch.
 
 | Field | Type | Required | Description |
 |---|---|---|---|

@@ -736,14 +736,13 @@ fn expand_access_preset(protocol: &str, access: &str) -> Option<Vec<L7Rule>> {
                 .into_iter()
                 .map(|rpc_method| L7Rule {
                     allow: Some(L7Allow {
-                        method: String::new(),
+                        method: rpc_method.to_string(),
                         path: String::new(),
                         command: String::new(),
                         query: HashMap::default(),
                         operation_type: String::new(),
                         operation_name: String::new(),
                         fields: Vec::new(),
-                        rpc_method: rpc_method.to_string(),
                         params: HashMap::default(),
                     }),
                 })

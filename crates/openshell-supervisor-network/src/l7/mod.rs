@@ -1030,7 +1030,6 @@ pub fn validate_l7_policies(data_json: &serde_json::Value) -> (Vec<String>, Vec<
                                 "{deny_loc}: GraphQL rule fields are ignored unless protocol is graphql or websocket"
                             ));
                         }
-
                     }
                 }
             }
