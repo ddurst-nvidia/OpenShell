@@ -2458,12 +2458,12 @@ network_policies:
           max_body_bytes: 131072
         rules:
           deny:
-            - mcp_method: tools/call
+            - method: tools/call
               tool: delete_resource
           allow:
-            - mcp_method: initialize
-            - mcp_method: tools/list
-            - mcp_method: tools/call
+            - method: initialize
+            - method: tools/list
+            - method: tools/call
               tool: read_status
     binaries:
       - { path: /usr/bin/node }

@@ -266,8 +266,6 @@ struct L7AllowDef {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     rpc_method: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
-    mcp_method: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
     tool: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     params: BTreeMap<String, ParamMatcherDef>,
@@ -317,8 +315,6 @@ struct L7DenyRuleDef {
     fields: Vec<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     rpc_method: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    mcp_method: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     tool: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -448,16 +444,6 @@ fn insert_nested_param(
     insert_nested_param(children, &remainder, matcher)
 }
 
-// `mcp_method` is a YAML alias for `rpc_method`; both compile to the existing
-// proto field so older runtime policy evaluation stays compatible.
-fn method_from_aliases(rpc_method: String, mcp_method: String) -> String {
-    if mcp_method.is_empty() {
-        rpc_method
-    } else {
-        mcp_method
-    }
-}
-
 // MCP `tool` is a policy convenience for the standard `tools/call` params.name
 // field. It only fills the matcher when the caller did not set `params.name`.
 fn params_with_tool(
@@ -472,15 +458,26 @@ fn params_with_tool(
     params
 }
 
-fn allow_def_to_proto(allow: L7AllowDef) -> L7Allow {
+fn allow_def_to_proto(protocol: &str, allow: L7AllowDef) -> L7Allow {
+    let (method, rpc_method) = if is_mcp_protocol(protocol) {
+        let rpc_method = if allow.method.is_empty() {
+            allow.rpc_method
+        } else {
+            allow.method
+        };
+        (String::new(), rpc_method)
+    } else {
+        (allow.method, allow.rpc_method)
+    };
+
     L7Allow {
-        method: allow.method,
+        method,
         path: allow.path,
         command: allow.command,
         operation_type: allow.operation_type,
         operation_name: allow.operation_name,
         fields: allow.fields,
-        rpc_method: method_from_aliases(allow.rpc_method, allow.mcp_method),
+        rpc_method,
         query: allow
             .query
             .into_iter()
@@ -493,15 +490,26 @@ fn allow_def_to_proto(allow: L7AllowDef) -> L7Allow {
     }
 }
 
-fn deny_def_to_proto(deny: L7DenyRuleDef) -> L7DenyRule {
+fn deny_def_to_proto(protocol: &str, deny: L7DenyRuleDef) -> L7DenyRule {
+    let (method, rpc_method) = if is_mcp_protocol(protocol) {
+        let rpc_method = if deny.method.is_empty() {
+            deny.rpc_method
+        } else {
+            deny.method
+        };
+        (String::new(), rpc_method)
+    } else {
+        (deny.method, deny.rpc_method)
+    };
+
     L7DenyRule {
-        method: deny.method,
+        method,
         path: deny.path,
         command: deny.command,
         operation_type: deny.operation_type,
         operation_name: deny.operation_name,
         fields: deny.fields,
-        rpc_method: method_from_aliases(deny.rpc_method, deny.mcp_method),
+        rpc_method,
         query: deny
             .query
             .into_iter()
@@ -557,13 +565,13 @@ fn allow_proto_to_def(protocol: &str, allow: L7Allow) -> L7AllowDef {
         .collect();
     let (tool, params) = split_tool_param(protocol, params);
     let params = flat_params_to_def(protocol, params);
-    let (rpc_method, mcp_method) = if is_mcp_protocol(protocol) {
-        (String::new(), allow.rpc_method)
-    } else {
+    let (method, rpc_method) = if is_mcp_protocol(protocol) {
         (allow.rpc_method, String::new())
+    } else {
+        (allow.method, allow.rpc_method)
     };
     L7AllowDef {
-        method: allow.method,
+        method,
         path: allow.path,
         command: allow.command,
         query: allow
@@ -575,7 +583,6 @@ fn allow_proto_to_def(protocol: &str, allow: L7Allow) -> L7AllowDef {
         operation_name: allow.operation_name,
         fields: allow.fields,
         rpc_method,
-        mcp_method,
         tool,
         params,
     }
@@ -589,13 +596,13 @@ fn deny_proto_to_def(protocol: &str, deny: &L7DenyRule) -> L7DenyRuleDef {
         .collect();
     let (tool, params) = split_tool_param(protocol, params);
     let params = flat_params_to_def(protocol, params);
-    let (rpc_method, mcp_method) = if is_mcp_protocol(protocol) {
-        (String::new(), deny.rpc_method.clone())
-    } else {
+    let (method, rpc_method) = if is_mcp_protocol(protocol) {
         (deny.rpc_method.clone(), String::new())
+    } else {
+        (deny.method.clone(), deny.rpc_method.clone())
     };
     L7DenyRuleDef {
-        method: deny.method.clone(),
+        method,
         path: deny.path.clone(),
         command: deny.command.clone(),
         query: deny
@@ -607,7 +614,6 @@ fn deny_proto_to_def(protocol: &str, deny: &L7DenyRule) -> L7DenyRuleDef {
         operation_name: deny.operation_name.clone(),
         fields: deny.fields.clone(),
         rpc_method,
-        mcp_method,
         tool,
         params,
     }
@@ -628,6 +634,7 @@ fn to_proto(raw: PolicyFile) -> SandboxPolicy {
                     .endpoints
                     .into_iter()
                     .map(|e| {
+                        let protocol = e.protocol;
                         let (allow_rules, grouped_deny_rules) = e.rules.into_parts();
                         let mut deny_rules = grouped_deny_rules;
                         deny_rules.extend(e.deny_rules);
@@ -645,18 +652,21 @@ fn to_proto(raw: PolicyFile) -> SandboxPolicy {
                             path: e.path,
                             port: normalized_ports.first().copied().unwrap_or(0),
                             ports: normalized_ports,
-                            protocol: e.protocol,
+                            protocol: protocol.clone(),
                             tls: e.tls,
                             enforcement: e.enforcement,
                             access: e.access,
                             rules: allow_rules
                                 .into_iter()
                                 .map(|r| L7Rule {
-                                    allow: Some(allow_def_to_proto(r.allow)),
+                                    allow: Some(allow_def_to_proto(&protocol, r.allow)),
                                 })
                                 .collect(),
                             allowed_ips: e.allowed_ips,
-                            deny_rules: deny_rules.into_iter().map(deny_def_to_proto).collect(),
+                            deny_rules: deny_rules
+                                .into_iter()
+                                .map(|deny| deny_def_to_proto(&protocol, deny))
+                                .collect(),
                             allow_encoded_slash: e.allow_encoded_slash,
                             websocket_credential_rewrite: e.websocket_credential_rewrite,
                             request_body_credential_rewrite: e.request_body_credential_rewrite,
@@ -2048,7 +2058,7 @@ network_policies:
     }
 
     #[test]
-    fn parse_grouped_mcp_rules_to_jsonrpc_runtime_fields() {
+    fn parse_grouped_mcp_rules_to_runtime_fields() {
         let yaml = r"
 version: 1
 network_policies:
@@ -2064,12 +2074,12 @@ network_policies:
           max_body_bytes: 131072
         rules:
           deny:
-            - mcp_method: tools/call
+            - method: tools/call
               tool: send_email
           allow:
-            - mcp_method: initialize
-            - mcp_method: tools/list
-            - mcp_method: tools/call
+            - method: initialize
+            - method: tools/list
+            - method: tools/call
               tool: search_web
               params:
                 arguments:
@@ -2112,13 +2122,13 @@ network_policies:
           max_body_bytes: 131072
         rules:
           allow:
-            - mcp_method: tools/call
+            - method: tools/call
               tool: search_web
               params:
                 arguments:
                   repository: NVIDIA/OpenShell
           deny:
-            - mcp_method: tools/call
+            - method: tools/call
               tool: send_email
     binaries:
       - path: /usr/bin/curl
@@ -2128,7 +2138,7 @@ network_policies:
         let proto2 = parse_sandbox_policy(&yaml_out).expect("re-parse failed");
 
         assert!(yaml_out.contains("protocol: mcp"));
-        assert!(yaml_out.contains("mcp_method: tools/call"));
+        assert!(yaml_out.contains("method: tools/call"));
         assert!(yaml_out.contains("tool: search_web"));
         assert!(yaml_out.contains("tool: send_email"));
         assert!(yaml_out.contains("arguments:"));
