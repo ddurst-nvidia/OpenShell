@@ -567,7 +567,7 @@ fn l7_protocol_log_summary(
 
     if let Some(info) = jsonrpc_info {
         return format!(
-            " rpc_methods={} params_sha256={}",
+            " rule_methods={} params_sha256={}",
             rule_method_names_for_log(info),
             info.params_sha256()
                 .unwrap_or_else(|| "<empty>".to_string())

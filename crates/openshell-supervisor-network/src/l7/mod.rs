@@ -593,31 +593,15 @@ fn validate_jsonrpc_rule_fields(
     rule: &serde_json::Value,
     protocol: &str,
 ) {
-    if rule.get("mcp_method").is_some() {
-        errors.push(format!(
-            "{loc}.mcp_method: use `method` for protocol mcp L7 rules"
-        ));
-    }
-
-    let rpc_method = rule
-        .get("rpc_method")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let method = rule.get("method").and_then(|v| v.as_str()).unwrap_or("");
     let has_params = rule.get("params").is_some_and(|v| !v.is_null());
     let jsonrpc_family = protocol == "json-rpc" || protocol == "mcp";
 
     if jsonrpc_family {
-        let method_field = if protocol == "mcp" {
-            "method"
-        } else {
-            "rpc_method"
-        };
-        if rpc_method.is_empty() {
-            errors.push(format!(
-                "{loc}.{method_field}: required for {protocol} L7 rules"
-            ));
-        } else if let Some(warning) = check_glob_syntax(rpc_method) {
-            warnings.push(format!("{loc}.{method_field}: {warning}"));
+        if method.is_empty() {
+            errors.push(format!("{loc}.method: required for {protocol} L7 rules"));
+        } else if let Some(warning) = check_glob_syntax(method) {
+            warnings.push(format!("{loc}.method: {warning}"));
         }
         validate_matcher_map(
             errors,
@@ -627,17 +611,12 @@ fn validate_jsonrpc_rule_fields(
         );
         if json_rule_has_non_empty_path_or_query(rule) {
             errors.push(format!(
-                "{loc}: {protocol} L7 rules must use {method_field}/params, not path/query"
+                "{loc}: {protocol} L7 rules must use method/params, not path/query"
             ));
         }
         return;
     }
 
-    if !rpc_method.is_empty() {
-        errors.push(format!(
-            "{loc}.rpc_method: JSON-RPC method matching is only valid for protocol json-rpc or mcp"
-        ));
-    }
     if has_params {
         errors.push(format!(
             "{loc}.params: JSON-RPC params matching is only valid for protocol json-rpc or mcp"
@@ -775,24 +754,14 @@ pub fn validate_l7_policies(data_json: &serde_json::Value) -> (Vec<String>, Vec<
             }
 
             if (protocol == "json-rpc" || protocol == "mcp") && !access.is_empty() {
-                let method_field = if protocol == "mcp" {
-                    "method"
-                } else {
-                    "rpc_method"
-                };
                 errors.push(format!(
-                    "{loc}: protocol {protocol} does not support access presets; use explicit rules with allow.{method_field} such as \"*\""
+                    "{loc}: protocol {protocol} does not support access presets; use explicit rules with allow.method such as \"*\""
                 ));
             }
 
             if (protocol == "json-rpc" || protocol == "mcp") && !has_rules {
-                let method_field = if protocol == "mcp" {
-                    "method"
-                } else {
-                    "rpc_method"
-                };
                 errors.push(format!(
-                    "{loc}: protocol {protocol} requires explicit rules with allow.{method_field}"
+                    "{loc}: protocol {protocol} requires explicit rules with allow.method"
                 ));
             }
 
@@ -2538,7 +2507,7 @@ mod tests {
                         "protocol": "mcp",
                         "rules": [{
                             "allow": {
-                                "rpc_method": "tools/call",
+                                "method": "tools/call",
                                 "params": {
                                     "name": "submit_report",
                                     "arguments": {

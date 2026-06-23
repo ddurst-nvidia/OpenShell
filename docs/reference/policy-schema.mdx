@@ -183,7 +183,7 @@ The `access` field accepts one of the following values on REST, WebSocket, and G
 | `read-only` | `GET`, `HEAD`, `OPTIONS`. | WebSocket upgrade handshake only. | `query` operations. | Rejected. |
 | `read-write` | `GET`, `HEAD`, `OPTIONS`, `POST`, `PUT`, `PATCH`. | WebSocket upgrade handshake and client text messages. | `query` and `mutation` operations. | Rejected. |
 
-For MCP endpoints, configure explicit `rules` with `method`, optional `tool`, and optional `params`. For generic JSON-RPC endpoints, use `rpc_method` and optional `params`.
+For MCP endpoints, configure explicit `rules` with `method`, optional `tool`, and optional `params`. For generic JSON-RPC endpoints, use `method` and optional `params`.
 
 #### Allow Rule Objects
 
@@ -328,7 +328,7 @@ JSON-RPC allow rules match sandbox-to-server JSON-RPC-over-HTTP request objects 
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `rpc_method` | string | Yes | JSON-RPC method name or OpenShell glob, such as `initialize`, `tools/list`, or `tools/*`. `*` is OpenShell policy matching syntax, not JSON-RPC method syntax. |
+| `method` | string | Yes | JSON-RPC method name or OpenShell glob, such as `initialize`, `tools/list`, or `tools/*`. `*` is OpenShell policy matching syntax, not JSON-RPC method syntax. |
 | `params` | map | No | Nested params matcher map. Matcher leaves can be a glob string or an object with `any`. Dot-separated keys such as `arguments.scope` remain accepted for compatibility. Strings, numbers, and booleans are converted to strings; arrays, `null`, and non-object top-level params do not produce matcher keys. Requests with literal `.` characters in params object keys are rejected before policy evaluation because they are ambiguous with flattened nested paths. |
 
 Example JSON-RPC allow rules:
@@ -344,15 +344,15 @@ endpoints:
       max_body_bytes: 131072
     rules:
       - allow:
-          rpc_method: initialize
+          method: initialize
       - allow:
-          rpc_method: tools/list
+          method: tools/list
       - allow:
-          rpc_method: tools/call
+          method: tools/call
           params:
             name: read_status
       - allow:
-          rpc_method: tools/call
+          method: tools/call
           params:
             name: submit_report
             arguments:
@@ -447,8 +447,8 @@ JSON-RPC deny rules use the same field names as JSON-RPC allow rules, but they a
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `rpc_method` | string | Yes | JSON-RPC method name or glob to deny. A value without glob metacharacters matches that exact method name. In glob patterns, `*` matches any character sequence, so `rpc_method: "*"` denies any JSON-RPC method rather than a literal method named `*`. To deny a literal method named `*`, escape the glob character as `rpc_method: "\\*"`. |
-| `params` | map | No | Params matchers keyed by flattened object-param path. Omit to deny every call matching `rpc_method`. Strings, numbers, and booleans are converted to strings; arrays, `null`, and non-object top-level params do not produce matcher keys. |
+| `method` | string | Yes | JSON-RPC method name or glob to deny. A value without glob metacharacters matches that exact method name. In glob patterns, `*` matches any character sequence, so `method: "*"` denies any JSON-RPC method rather than a literal method named `*`. To deny a literal method named `*`, escape the glob character as `method: "\\*"`. |
+| `params` | map | No | Params matchers keyed by flattened object-param path. Omit to deny every call matching `method`. Strings, numbers, and booleans are converted to strings; arrays, `null`, and non-object top-level params do not produce matcher keys. |
 
 Example JSON-RPC deny rules:
 
@@ -461,9 +461,9 @@ endpoints:
     enforcement: enforce
     rules:
       - allow:
-          rpc_method: tools/*
+          method: tools/*
     deny_rules:
-      - rpc_method: tools/call
+      - method: tools/call
         params:
           name: delete_resource
 ```

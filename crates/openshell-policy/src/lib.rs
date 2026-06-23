@@ -213,8 +213,6 @@ struct L7AllowDef {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     fields: Vec<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
-    rpc_method: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
     tool: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     params: BTreeMap<String, ParamMatcherDef>,
@@ -262,8 +260,6 @@ struct L7DenyRuleDef {
     operation_name: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     fields: Vec<String>,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    rpc_method: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     tool: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -407,19 +403,9 @@ fn params_with_tool(
     params
 }
 
-fn allow_def_to_proto(protocol: &str, allow: L7AllowDef) -> L7Allow {
-    let method = if is_jsonrpc_family_protocol(protocol) {
-        if allow.method.is_empty() {
-            allow.rpc_method
-        } else {
-            allow.method
-        }
-    } else {
-        allow.method
-    };
-
+fn allow_def_to_proto(_protocol: &str, allow: L7AllowDef) -> L7Allow {
     L7Allow {
-        method,
+        method: allow.method,
         path: allow.path,
         command: allow.command,
         operation_type: allow.operation_type,
@@ -437,19 +423,9 @@ fn allow_def_to_proto(protocol: &str, allow: L7AllowDef) -> L7Allow {
     }
 }
 
-fn deny_def_to_proto(protocol: &str, deny: L7DenyRuleDef) -> L7DenyRule {
-    let method = if is_jsonrpc_family_protocol(protocol) {
-        if deny.method.is_empty() {
-            deny.rpc_method
-        } else {
-            deny.method
-        }
-    } else {
-        deny.method
-    };
-
+fn deny_def_to_proto(_protocol: &str, deny: L7DenyRuleDef) -> L7DenyRule {
     L7DenyRule {
-        method,
+        method: deny.method,
         path: deny.path,
         command: deny.command,
         operation_type: deny.operation_type,
@@ -478,14 +454,6 @@ fn json_rpc_max_body_bytes(json_rpc: &Option<JsonRpcConfigDef>, mcp: &Option<Mcp
 
 fn is_mcp_protocol(protocol: &str) -> bool {
     protocol.eq_ignore_ascii_case("mcp")
-}
-
-fn is_jsonrpc_protocol(protocol: &str) -> bool {
-    protocol.eq_ignore_ascii_case("json-rpc")
-}
-
-fn is_jsonrpc_family_protocol(protocol: &str) -> bool {
-    is_mcp_protocol(protocol) || is_jsonrpc_protocol(protocol)
 }
 
 fn split_tool_param(
@@ -518,15 +486,8 @@ fn allow_proto_to_def(protocol: &str, allow: L7Allow) -> L7AllowDef {
         .collect();
     let (tool, params) = split_tool_param(protocol, params);
     let params = flat_params_to_def(protocol, params);
-    let (method, rpc_method) = if is_mcp_protocol(protocol) {
-        (allow.method, String::new())
-    } else if is_jsonrpc_protocol(protocol) {
-        (String::new(), allow.method)
-    } else {
-        (allow.method, String::new())
-    };
     L7AllowDef {
-        method,
+        method: allow.method,
         path: allow.path,
         command: allow.command,
         query: allow
@@ -537,7 +498,6 @@ fn allow_proto_to_def(protocol: &str, allow: L7Allow) -> L7AllowDef {
         operation_type: allow.operation_type,
         operation_name: allow.operation_name,
         fields: allow.fields,
-        rpc_method,
         tool,
         params,
     }
@@ -551,15 +511,8 @@ fn deny_proto_to_def(protocol: &str, deny: &L7DenyRule) -> L7DenyRuleDef {
         .collect();
     let (tool, params) = split_tool_param(protocol, params);
     let params = flat_params_to_def(protocol, params);
-    let (method, rpc_method) = if is_mcp_protocol(protocol) {
-        (deny.method.clone(), String::new())
-    } else if is_jsonrpc_protocol(protocol) {
-        (String::new(), deny.method.clone())
-    } else {
-        (deny.method.clone(), String::new())
-    };
     L7DenyRuleDef {
-        method,
+        method: deny.method.clone(),
         path: deny.path.clone(),
         command: deny.command.clone(),
         query: deny
@@ -570,7 +523,6 @@ fn deny_proto_to_def(protocol: &str, deny: &L7DenyRule) -> L7DenyRuleDef {
         operation_type: deny.operation_type.clone(),
         operation_name: deny.operation_name.clone(),
         fields: deny.fields.clone(),
-        rpc_method,
         tool,
         params,
     }

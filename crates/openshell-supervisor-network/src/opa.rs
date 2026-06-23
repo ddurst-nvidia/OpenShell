@@ -860,20 +860,15 @@ fn normalize_jsonrpc_config_alias(ep: &mut serde_json::Map<String, serde_json::V
 }
 
 fn normalize_l7_rules_aliases(ep: &mut serde_json::Map<String, serde_json::Value>) {
-    let protocol = ep
-        .get("protocol")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("")
-        .to_string();
     if let Some(rules) = ep.get_mut("rules").and_then(|v| v.as_array_mut()) {
         for rule in rules {
             if let Some(allow) = rule
                 .get_mut("allow")
                 .and_then(serde_json::Value::as_object_mut)
             {
-                normalize_l7_rule_aliases(allow, &protocol);
+                normalize_l7_rule_aliases(allow);
             } else if let Some(allow) = rule.as_object_mut() {
-                normalize_l7_rule_aliases(allow, &protocol);
+                normalize_l7_rule_aliases(allow);
             }
         }
     }
@@ -881,27 +876,13 @@ fn normalize_l7_rules_aliases(ep: &mut serde_json::Map<String, serde_json::Value
     if let Some(denies) = ep.get_mut("deny_rules").and_then(|v| v.as_array_mut()) {
         for deny in denies {
             if let Some(deny_obj) = deny.as_object_mut() {
-                normalize_l7_rule_aliases(deny_obj, &protocol);
+                normalize_l7_rule_aliases(deny_obj);
             }
         }
     }
 }
 
-fn normalize_l7_rule_aliases(
-    rule: &mut serde_json::Map<String, serde_json::Value>,
-    protocol: &str,
-) {
-    if protocol == "mcp"
-        && let Some(method) = rule.remove("method")
-        && rule
-            .get("rpc_method")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .is_empty()
-    {
-        rule.insert("rpc_method".to_string(), method);
-    }
-
+fn normalize_l7_rule_aliases(rule: &mut serde_json::Map<String, serde_json::Value>) {
     if let Some(tool) = rule.remove("tool")
         && let Some(tool_name) = tool.as_str().filter(|s| !s.is_empty())
     {
@@ -1188,20 +1169,17 @@ fn proto_to_opa_data_json(proto: &ProtoSandboxPolicy, entrypoint_pid: u32) -> St
                         ep["access"] = e.access.clone().into();
                     }
                     if !e.rules.is_empty() {
-                        let jsonrpc_family =
-                            matches!(e.protocol.as_str(), "json-rpc" | "mcp");
                         let rules: Vec<serde_json::Value> = e
                             .rules
                             .iter()
                             .map(|r| {
                                 let a = r.allow.as_ref();
                                 let mut allow = serde_json::json!({
-                                    "method": if jsonrpc_family { "" } else { a.map_or("", |a| &a.method) },
+                                    "method": a.map_or("", |a| &a.method),
                                     "path": a.map_or("", |a| &a.path),
                                     "command": a.map_or("", |a| &a.command),
                                     "operation_type": a.map_or("", |a| &a.operation_type),
                                     "operation_name": a.map_or("", |a| &a.operation_name),
-                                    "rpc_method": if jsonrpc_family { a.map_or("", |a| &a.method) } else { "" },
                                 });
                                 if let Some(a) = a
                                     && !a.fields.is_empty()
@@ -1232,16 +1210,12 @@ fn proto_to_opa_data_json(proto: &ProtoSandboxPolicy, entrypoint_pid: u32) -> St
                         ep["advisor_proposed"] = true.into();
                     }
                     if !e.deny_rules.is_empty() {
-                        let jsonrpc_family =
-                            matches!(e.protocol.as_str(), "json-rpc" | "mcp");
                         let deny_rules: Vec<serde_json::Value> = e
                             .deny_rules
                             .iter()
                             .map(|d| {
                                 let mut deny = serde_json::json!({});
-                                if jsonrpc_family && !d.method.is_empty() {
-                                    deny["rpc_method"] = d.method.clone().into();
-                                } else if !d.method.is_empty() {
+                                if !d.method.is_empty() {
                                     deny["method"] = d.method.clone().into();
                                 }
                                 if !d.path.is_empty() {
@@ -2896,7 +2870,7 @@ network_policies:
         enforcement: enforce
         rules:
           - allow:
-              rpc_method: initialize
+              method: initialize
     binaries:
       - { path: /usr/bin/curl }
 "#;
@@ -3040,7 +3014,7 @@ network_policies:
         enforcement: enforce
         rules:
           - allow:
-              rpc_method: initialize
+              method: initialize
     binaries:
       - { path: /usr/bin/curl }
 "#;
@@ -3076,7 +3050,7 @@ network_policies:
         enforcement: enforce
         rules:
           - allow:
-              rpc_method: initialize
+              method: initialize
     binaries:
       - { path: /usr/bin/curl }
 "#;
@@ -3109,9 +3083,9 @@ network_policies:
         enforcement: enforce
         rules:
           - allow:
-              rpc_method: initialize
+              method: initialize
         deny_rules:
-          - rpc_method: tools/delete
+          - method: tools/delete
     binaries:
       - { path: /usr/bin/curl }
 "#;
@@ -3154,16 +3128,16 @@ network_policies:
         enforcement: enforce
         rules:
           - allow:
-              rpc_method: tools/call
+              method: tools/call
               params:
                 name: read_status
           - allow:
-              rpc_method: tools/call
+              method: tools/call
               params:
                 name: submit_report
                 arguments.scope: workspace/main
         deny_rules:
-          - rpc_method: tools/call
+          - method: tools/call
             params:
               name: blocked_action
     binaries:
@@ -3295,7 +3269,7 @@ network_policies:
         enforcement: enforce
         rules:
           - allow:
-              rpc_method: tools/list
+              method: tools/list
     binaries:
       - { path: /usr/bin/curl }
 "#;
@@ -3332,7 +3306,7 @@ network_policies:
         enforcement: enforce
         rules:
           - allow:
-              rpc_method: tools/call
+              method: tools/call
               params:
                 name:
                   any: []

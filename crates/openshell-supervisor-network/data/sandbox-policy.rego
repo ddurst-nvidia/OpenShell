@@ -282,7 +282,7 @@ request_denied_for_endpoint(request, endpoint) if {
 	request.method == "POST"
 	some deny_rule
 	deny_rule := endpoint.deny_rules[_]
-	deny_rule.rpc_method
+	deny_rule.method
 	jsonrpc_rule_matches(request, deny_rule)
 }
 
@@ -451,7 +451,7 @@ request_allowed_for_endpoint(request, endpoint) if {
 	request.method == "POST"
 	some rule
 	rule := endpoint.rules[_]
-	rule.allow.rpc_method
+	rule.allow.method
 	not jsonrpc_response_frame_present(request)
 	jsonrpc_rule_matches(request, rule.allow)
 }
@@ -707,10 +707,10 @@ jsonrpc_rule_matches(request, rule) if {
 	method := object.get(jsonrpc, "method", "")
 	is_string(method)
 	method != ""
-	rpc_method := object.get(rule, "rpc_method", "")
-	is_string(rpc_method)
-	rpc_method != ""
-	glob.match(rpc_method, [], method)
+	rule_method := object.get(rule, "method", "")
+	is_string(rule_method)
+	rule_method != ""
+	glob.match(rule_method, [], method)
 	jsonrpc_params_match(jsonrpc, rule)
 }
 
