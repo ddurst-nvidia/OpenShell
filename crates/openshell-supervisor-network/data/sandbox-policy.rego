@@ -471,11 +471,12 @@ jsonrpc_family_endpoint(endpoint) if {
 request_allowed_for_endpoint(request, endpoint) if {
 	jsonrpc_family_endpoint(endpoint)
 	request.method == "GET"
-	is_object(request.jsonrpc)
-	object.get(request.jsonrpc, "receive_stream", false)
-	jsonrpc_no_parse_error(request.jsonrpc)
-	object.get(request.jsonrpc, "method", null) == null
-	not object.get(request.jsonrpc, "has_response", false)
+	jsonrpc := object.get(request, "jsonrpc", null)
+	is_object(jsonrpc)
+	object.get(jsonrpc, "receive_stream", false)
+	jsonrpc_no_parse_error(jsonrpc)
+	object.get(jsonrpc, "method", null) == null
+	not object.get(jsonrpc, "has_response", false)
 }
 
 # --- L7 rule matching: GraphQL operation ---
@@ -715,16 +716,18 @@ jsonrpc_rule_matches(request, rule) if {
 }
 
 jsonrpc_response_frame_present(request) if {
-	jsonrpc := object.get(request, "jsonrpc", {})
+	jsonrpc := object.get(request, "jsonrpc", null)
 	is_object(jsonrpc)
 	object.get(jsonrpc, "has_response", false)
 }
 
 jsonrpc_no_parse_error(jsonrpc) if {
+	is_object(jsonrpc)
 	object.get(jsonrpc, "error", null) == null
 }
 
 jsonrpc_no_parse_error(jsonrpc) if {
+	is_object(jsonrpc)
 	object.get(jsonrpc, "error", "") == ""
 }
 
@@ -742,6 +745,7 @@ jsonrpc_param_mismatch(jsonrpc, param_rules) if {
 }
 
 jsonrpc_param_key_matches(jsonrpc, key, matcher) if {
+	is_object(jsonrpc)
 	params := object.get(jsonrpc, "params", {})
 	is_object(params)
 	value := object.get(params, key, null)

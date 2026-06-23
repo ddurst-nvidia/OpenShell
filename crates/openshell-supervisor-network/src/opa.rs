@@ -2936,6 +2936,22 @@ network_policies:
             }
         });
         assert!(!eval_l7(&engine, &bodyless_get_without_receive_stream));
+
+        let null_metadata_get = serde_json::json!({
+            "network": { "host": "mcp.stream.test", "port": 8000 },
+            "exec": {
+                "path": "/usr/bin/curl",
+                "ancestors": [],
+                "cmdline_paths": []
+            },
+            "request": {
+                "method": "GET",
+                "path": "/mcp",
+                "query_params": {},
+                "jsonrpc": null
+            }
+        });
+        assert!(!eval_l7(&engine, &null_metadata_get));
     }
 
     #[test]
@@ -3286,6 +3302,48 @@ network_policies:
                 "path": "/mcp",
                 "query_params": {},
                 "jsonrpc": null
+            }
+        });
+
+        assert!(!eval_l7(&engine, &input));
+    }
+
+    #[test]
+    fn l7_jsonrpc_null_params_non_matches_without_opa_error() {
+        let data = r#"
+network_policies:
+  jsonrpc_null_params:
+    name: jsonrpc_null_params
+    endpoints:
+      - host: mcp.null-params.test
+        port: 8000
+        path: /mcp
+        protocol: json-rpc
+        enforcement: enforce
+        rules:
+          - allow:
+              method: tools/call
+              params:
+                name: read_status
+    binaries:
+      - { path: /usr/bin/curl }
+"#;
+        let engine = OpaEngine::from_strings(TEST_POLICY, data).expect("engine from yaml");
+        let input = serde_json::json!({
+            "network": { "host": "mcp.null-params.test", "port": 8000 },
+            "exec": {
+                "path": "/usr/bin/curl",
+                "ancestors": [],
+                "cmdline_paths": []
+            },
+            "request": {
+                "method": "POST",
+                "path": "/mcp",
+                "query_params": {},
+                "jsonrpc": {
+                    "method": "tools/call",
+                    "params": null
+                }
             }
         });
 
