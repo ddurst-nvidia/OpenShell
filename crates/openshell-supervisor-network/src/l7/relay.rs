@@ -324,9 +324,9 @@ where
                 )
                 .await
                 {
-                    Ok(body) => Some(crate::l7::jsonrpc::parse_jsonrpc_body_with_mode(
+                    Ok(body) => Some(crate::l7::jsonrpc::parse_jsonrpc_body(
                         &body,
-                        jsonrpc_inspection_mode(config.protocol),
+                        crate::l7::jsonrpc::JsonRpcInspectionMode::for_protocol(config.protocol),
                     )),
                     Err(e) => {
                         if is_benign_connection_error(&e) {
@@ -727,13 +727,6 @@ pub(crate) fn websocket_extension_mode(config: &L7EndpointConfig) -> WebSocketEx
     }
 }
 
-fn jsonrpc_inspection_mode(protocol: L7Protocol) -> crate::l7::jsonrpc::JsonRpcInspectionMode {
-    match protocol {
-        L7Protocol::Mcp => crate::l7::jsonrpc::JsonRpcInspectionMode::Mcp,
-        _ => crate::l7::jsonrpc::JsonRpcInspectionMode::JsonRpc,
-    }
-}
-
 fn jsonrpc_engine_type(protocol: L7Protocol) -> &'static str {
     match protocol {
         L7Protocol::Mcp => "l7-mcp",
@@ -1038,7 +1031,7 @@ where
                 allow_encoded_slash: config.allow_encoded_slash,
                 ..Default::default()
             },
-            jsonrpc_inspection_mode(config.protocol),
+            crate::l7::jsonrpc::JsonRpcInspectionMode::for_protocol(config.protocol),
         )
         .await
         {
@@ -2359,6 +2352,7 @@ network_policies:
                     {"jsonrpc":"2.0","id":1,"method":"tools/list"},
                     {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_status"}}
                 ]"#,
+                crate::l7::jsonrpc::JsonRpcInspectionMode::JsonRpc,
             )),
         };
 
@@ -2370,6 +2364,7 @@ network_policies:
                 {"jsonrpc":"2.0","id":1,"method":"tools/list"},
                 {"jsonrpc":"2.0","id":2,"result":{"ok":true}}
             ]"#,
+            crate::l7::jsonrpc::JsonRpcInspectionMode::JsonRpc,
         ));
         let (allowed, reason) = evaluate_l7_request(&tunnel_engine, &ctx, &request).unwrap();
         assert!(!allowed);
@@ -2387,6 +2382,7 @@ network_policies:
 
         request.jsonrpc = Some(crate::l7::jsonrpc::parse_jsonrpc_body(
             br#"{"jsonrpc":"2.0","id":2,"result":{"ok":true}}"#,
+            crate::l7::jsonrpc::JsonRpcInspectionMode::JsonRpc,
         ));
         let (allowed, reason) = evaluate_l7_request(&tunnel_engine, &ctx, &request).unwrap();
         assert!(!allowed);
@@ -2405,6 +2401,7 @@ network_policies:
                 {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"blocked_action"}},
                 {"jsonrpc":"2.0","id":3,"method":"tools/delete","params":{"name":"purge_cache"}}
             ]"#,
+            crate::l7::jsonrpc::JsonRpcInspectionMode::JsonRpc,
         ));
         let (allowed, _) = evaluate_l7_request(&tunnel_engine, &ctx, &request).unwrap();
         assert!(!allowed);
@@ -2492,16 +2489,18 @@ network_policies:
             target: "/mcp".into(),
             query_params: std::collections::HashMap::new(),
             graphql: None,
-            jsonrpc: Some(crate::l7::jsonrpc::parse_mcp_body(
+            jsonrpc: Some(crate::l7::jsonrpc::parse_jsonrpc_body(
                 br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_status","arguments":{}}}"#,
+                crate::l7::jsonrpc::JsonRpcInspectionMode::Mcp,
             )),
         };
 
         let (allowed, reason) = evaluate_l7_request(&tunnel_engine, &ctx, &request).unwrap();
         assert!(allowed, "{reason}");
 
-        request.jsonrpc = Some(crate::l7::jsonrpc::parse_mcp_body(
+        request.jsonrpc = Some(crate::l7::jsonrpc::parse_jsonrpc_body(
             br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"delete_resource","arguments":{"scope":"workspace/main"}}}"#,
+            crate::l7::jsonrpc::JsonRpcInspectionMode::Mcp,
         ));
         let parsed = request.jsonrpc.as_ref().expect("parsed MCP request");
         assert!(
@@ -2525,6 +2524,7 @@ network_policies:
     fn jsonrpc_log_records_digest_not_args() {
         let info = crate::l7::jsonrpc::parse_jsonrpc_body(
             br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"delete_resource","arguments":{"scope":"secret-scope"}}}"#,
+            crate::l7::jsonrpc::JsonRpcInspectionMode::JsonRpc,
         );
         let params_sha256 = info.params_sha256().expect("params digest");
         let message = jsonrpc_log_message(
@@ -2550,6 +2550,7 @@ network_policies:
                 {"jsonrpc":"2.0","id":1,"method":"tools/list"},
                 {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"delete_resource"}}
             ]"#,
+            crate::l7::jsonrpc::JsonRpcInspectionMode::JsonRpc,
         );
         let batch_params_sha256 = batch.params_sha256().expect("batch params digest");
         let batch_message = jsonrpc_log_message(
@@ -2571,6 +2572,7 @@ network_policies:
 
         let no_params = crate::l7::jsonrpc::parse_jsonrpc_body(
             br#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#,
+            crate::l7::jsonrpc::JsonRpcInspectionMode::JsonRpc,
         );
         let no_params_sha256 = no_params
             .params_sha256()

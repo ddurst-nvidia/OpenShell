@@ -3636,14 +3636,11 @@ async fn handle_forward_proxy(
                     }
                 };
                 forward_request_bytes = jsonrpc_request.raw_header;
-                Some(crate::l7::jsonrpc::parse_jsonrpc_body_with_mode(
+                Some(crate::l7::jsonrpc::parse_jsonrpc_body(
                     &body,
-                    match l7_config.config.protocol {
-                        crate::l7::L7Protocol::Mcp => {
-                            crate::l7::jsonrpc::JsonRpcInspectionMode::Mcp
-                        }
-                        _ => crate::l7::jsonrpc::JsonRpcInspectionMode::JsonRpc,
-                    },
+                    crate::l7::jsonrpc::JsonRpcInspectionMode::for_protocol(
+                        l7_config.config.protocol,
+                    ),
                 ))
             }
         } else {

@@ -726,30 +726,6 @@ fn expand_existing_access(
 }
 
 fn expand_access_preset(protocol: &str, access: &str) -> Option<Vec<L7Rule>> {
-    if matches!(protocol, "json-rpc" | "mcp") {
-        let methods = match access {
-            "read-only" | "read-write" | "full" => vec!["*"],
-            _ => return None,
-        };
-        return Some(
-            methods
-                .into_iter()
-                .map(|method| L7Rule {
-                    allow: Some(L7Allow {
-                        method: method.to_string(),
-                        path: String::new(),
-                        command: String::new(),
-                        query: HashMap::default(),
-                        operation_type: String::new(),
-                        operation_name: String::new(),
-                        fields: Vec::new(),
-                        params: HashMap::default(),
-                    }),
-                })
-                .collect(),
-        );
-    }
-
     let methods = match (protocol, access) {
         (_, "full") => vec!["*"],
         ("websocket", "read-only") => vec!["GET"],

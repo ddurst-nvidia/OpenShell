@@ -489,11 +489,18 @@ fn validate_graphql_rule(
     validate_graphql_fields(errors, warnings, loc, rule.get("fields"));
 }
 
+#[derive(Clone, Copy)]
+enum MatcherNesting {
+    Flat,
+    Nested,
+}
+
 fn validate_matcher_map(
     errors: &mut Vec<String>,
     warnings: &mut Vec<String>,
     loc: &str,
     value: Option<&serde_json::Value>,
+    nesting: MatcherNesting,
 ) {
     let Some(value) = value.filter(|v| !v.is_null()) else {
         return;
@@ -504,7 +511,7 @@ fn validate_matcher_map(
     };
 
     for (key, matcher) in obj {
-        validate_matcher_value(errors, warnings, &format!("{loc}.{key}"), matcher);
+        validate_matcher_value(errors, warnings, &format!("{loc}.{key}"), matcher, nesting);
     }
 }
 
@@ -513,6 +520,7 @@ fn validate_matcher_value(
     warnings: &mut Vec<String>,
     loc: &str,
     matcher: &serde_json::Value,
+    nesting: MatcherNesting,
 ) {
     if let Some(glob_str) = matcher.as_str() {
         if let Some(warning) = check_glob_syntax(glob_str) {
@@ -522,21 +530,31 @@ fn validate_matcher_value(
     }
 
     let Some(matcher_obj) = matcher.as_object() else {
-        errors.push(format!(
-            "{loc}: expected string glob, matcher object, or nested matcher map"
-        ));
+        errors.push(format!("{loc}: {}", matcher_expected_message(nesting)));
         return;
     };
 
     let has_any = matcher_obj.get("any").is_some();
     let has_glob = matcher_obj.get("glob").is_some();
     if !has_any && !has_glob {
+        if matches!(nesting, MatcherNesting::Flat) {
+            errors.push(format!(
+                "{loc}: unknown matcher keys; only `glob` or `any` are supported"
+            ));
+            return;
+        }
         if matcher_obj.is_empty() {
             errors.push(format!("{loc}: nested matcher map must not be empty"));
             return;
         }
         for (key, child) in matcher_obj {
-            validate_matcher_value(errors, warnings, &format!("{loc}.{key}"), child);
+            validate_matcher_value(
+                errors,
+                warnings,
+                &format!("{loc}.{key}"),
+                child,
+                MatcherNesting::Nested,
+            );
         }
         return;
     }
@@ -586,6 +604,13 @@ fn validate_matcher_value(
     }
 }
 
+fn matcher_expected_message(nesting: MatcherNesting) -> &'static str {
+    match nesting {
+        MatcherNesting::Flat => "expected string glob or matcher object",
+        MatcherNesting::Nested => "expected string glob, matcher object, or nested matcher map",
+    }
+}
+
 fn validate_jsonrpc_rule_fields(
     errors: &mut Vec<String>,
     warnings: &mut Vec<String>,
@@ -595,7 +620,7 @@ fn validate_jsonrpc_rule_fields(
 ) {
     let method = rule.get("method").and_then(|v| v.as_str()).unwrap_or("");
     let has_params = rule.get("params").is_some_and(|v| !v.is_null());
-    let jsonrpc_family = protocol == "json-rpc" || protocol == "mcp";
+    let jsonrpc_family = L7Protocol::parse(protocol).is_some_and(L7Protocol::is_jsonrpc_family);
 
     if jsonrpc_family {
         if method.is_empty() {
@@ -608,6 +633,7 @@ fn validate_jsonrpc_rule_fields(
             warnings,
             &format!("{loc}.params"),
             rule.get("params"),
+            MatcherNesting::Nested,
         );
         if json_rule_has_non_empty_path_or_query(rule) {
             errors.push(format!(
@@ -695,6 +721,8 @@ pub fn validate_l7_policies(data_json: &serde_json::Value) -> (Vec<String>, Vec<
 
         for (i, ep) in endpoints.iter().enumerate() {
             let protocol = ep.get("protocol").and_then(|v| v.as_str()).unwrap_or("");
+            let l7_protocol = L7Protocol::parse(protocol);
+            let jsonrpc_family = l7_protocol.is_some_and(L7Protocol::is_jsonrpc_family);
             let tls = ep.get("tls").and_then(|v| v.as_str()).unwrap_or("");
             let enforcement = ep.get("enforcement").and_then(|v| v.as_str()).unwrap_or("");
             let access = ep.get("access").and_then(|v| v.as_str()).unwrap_or("");
@@ -753,13 +781,13 @@ pub fn validate_l7_policies(data_json: &serde_json::Value) -> (Vec<String>, Vec<
                 errors.push(format!("{loc}: rules and access are mutually exclusive"));
             }
 
-            if (protocol == "json-rpc" || protocol == "mcp") && !access.is_empty() {
+            if jsonrpc_family && !access.is_empty() {
                 errors.push(format!(
                     "{loc}: protocol {protocol} does not support access presets; use explicit rules with allow.method such as \"*\""
                 ));
             }
 
-            if (protocol == "json-rpc" || protocol == "mcp") && !has_rules {
+            if jsonrpc_family && !has_rules {
                 errors.push(format!(
                     "{loc}: protocol {protocol} requires explicit rules with allow.method"
                 ));
@@ -772,7 +800,7 @@ pub fn validate_l7_policies(data_json: &serde_json::Value) -> (Vec<String>, Vec<
                 ));
             }
 
-            if !protocol.is_empty() && L7Protocol::parse(protocol).is_none() {
+            if !protocol.is_empty() && l7_protocol.is_none() {
                 errors.push(format!(
                     "{loc}: unknown protocol '{protocol}' (expected rest, websocket, graphql, sql, json-rpc, or mcp)"
                 ));
@@ -823,10 +851,7 @@ pub fn validate_l7_policies(data_json: &serde_json::Value) -> (Vec<String>, Vec<
                 ));
             }
 
-            if protocol != "json-rpc"
-                && protocol != "mcp"
-                && ep.get("json_rpc_max_body_bytes").is_some()
-            {
+            if !jsonrpc_family && ep.get("json_rpc_max_body_bytes").is_some() {
                 warnings.push(format!(
                     "{loc}: JSON-RPC-specific endpoint fields are ignored unless protocol is json-rpc or mcp"
                 ));
@@ -956,6 +981,7 @@ pub fn validate_l7_policies(data_json: &serde_json::Value) -> (Vec<String>, Vec<
                                 &mut warnings,
                                 &format!("{deny_loc}.query"),
                                 Some(query),
+                                MatcherNesting::Flat,
                             );
                         }
 
@@ -1045,6 +1071,7 @@ pub fn validate_l7_policies(data_json: &serde_json::Value) -> (Vec<String>, Vec<
                             &mut warnings,
                             &format!("{loc}.rules[{rule_idx}].allow.query"),
                             Some(query),
+                            MatcherNesting::Flat,
                         );
                     }
                 }
@@ -1585,7 +1612,7 @@ mod tests {
         assert!(
             errors
                 .iter()
-                .any(|e| { e.contains("JSON-RPC allow rules must specify method") }),
+                .any(|e| { e.contains("rules[0].allow.method") && e.contains("required") }),
             "JSON-RPC allow rules without method should be rejected: {errors:?}"
         );
         assert!(
@@ -1626,13 +1653,13 @@ mod tests {
         assert!(
             errors
                 .iter()
-                .any(|e| { e.contains("rules[0].allow") && e.contains("params are only valid") }),
+                .any(|e| { e.contains("rules[0].allow.params") && e.contains("only valid") }),
             "REST allow rules with JSON-RPC fields should be rejected: {errors:?}"
         );
         assert!(
             errors
                 .iter()
-                .any(|e| { e.contains("deny_rules[0]") && e.contains("params are only valid") }),
+                .any(|e| { e.contains("deny_rules[0].params") && e.contains("only valid") }),
             "REST deny rules with JSON-RPC fields should be rejected: {errors:?}"
         );
     }
@@ -1664,7 +1691,7 @@ mod tests {
         assert!(
             errors
                 .iter()
-                .any(|e| e.contains("JSON-RPC deny rules must specify method")),
+                .any(|e| e.contains("deny_rules[0].method") && e.contains("required")),
             "JSON-RPC deny rules without method should be rejected: {errors:?}"
         );
     }
@@ -1683,7 +1710,7 @@ mod tests {
                             "allow": {
                                 "method": "tools/call",
                                 "params": {
-                                    "name": { "mode": "read-*" },
+                                    "name": { "glob": "read-*", "mode": "strict" },
                                     "scope": { "any": [] },
                                     "count": 1
                                 }
@@ -1715,7 +1742,8 @@ mod tests {
         );
         assert!(
             errors.iter().any(|e| {
-                e.contains("allow.params.count") && e.contains("expected string glob or object")
+                e.contains("allow.params.count")
+                    && e.contains("expected string glob, matcher object, or nested matcher map")
             }),
             "JSON-RPC params should reject non-string/non-object matchers: {errors:?}"
         );
@@ -2686,7 +2714,7 @@ mod tests {
         assert!(
             errors
                 .iter()
-                .any(|e| e.contains("expected string glob or object")),
+                .any(|e| e.contains("expected string glob or matcher object")),
             "should reject non-string/non-object matcher in deny query: {errors:?}"
         );
     }

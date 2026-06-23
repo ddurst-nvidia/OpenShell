@@ -24,6 +24,15 @@ pub enum JsonRpcInspectionMode {
     Mcp,
 }
 
+impl JsonRpcInspectionMode {
+    pub(crate) fn for_protocol(protocol: crate::l7::L7Protocol) -> Self {
+        match protocol {
+            crate::l7::L7Protocol::Mcp => Self::Mcp,
+            _ => Self::JsonRpc,
+        }
+    }
+}
+
 /// Parsed HTTP request plus the JSON-RPC-family metadata extracted from the
 /// body. The original HTTP request is still forwarded if policy allows it.
 pub struct JsonRpcHttpRequest {
@@ -49,7 +58,7 @@ pub(crate) async fn parse_jsonrpc_http_request<C: AsyncRead + AsyncWrite + Unpin
     }
     let body =
         crate::l7::http::read_body_for_inspection(client, &mut request, max_body_bytes).await?;
-    let info = parse_jsonrpc_body_with_mode(&body, inspection_mode);
+    let info = parse_jsonrpc_body(&body, inspection_mode);
     Ok(Some(JsonRpcHttpRequest { request, info }))
 }
 
@@ -142,21 +151,8 @@ fn request_accepts_sse(request: &L7Request) -> bool {
             })
     })
 }
-/// Parse a JSON-RPC 2.0 request body and extract the `method` field.
-///
-/// Returns an info struct with `method` set on success, or `error` set if the
-/// body is not valid JSON-RPC 2.0.
-pub fn parse_jsonrpc_body(body: &[u8]) -> JsonRpcRequestInfo {
-    parse_jsonrpc_body_with_mode(body, JsonRpcInspectionMode::JsonRpc)
-}
-
-/// Parse a JSON-RPC body as MCP, using tower-mcp-types for known MCP request
-/// and notification shapes while still allowing extension methods.
-pub fn parse_mcp_body(body: &[u8]) -> JsonRpcRequestInfo {
-    parse_jsonrpc_body_with_mode(body, JsonRpcInspectionMode::Mcp)
-}
-
-pub fn parse_jsonrpc_body_with_mode(
+/// Parse a JSON-RPC-family body using the endpoint's inspection mode.
+pub fn parse_jsonrpc_body(
     body: &[u8],
     inspection_mode: JsonRpcInspectionMode,
 ) -> JsonRpcRequestInfo {
@@ -449,7 +445,7 @@ mod tests {
     #[test]
     fn parses_method_from_request_body() {
         let body = br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
-        let info = parse_jsonrpc_body(body);
+        let info = parse_jsonrpc_body(body, JsonRpcInspectionMode::JsonRpc);
         assert_eq!(
             info.calls.first().map(|call| call.method.as_str()),
             Some("initialize")
@@ -463,7 +459,7 @@ mod tests {
     #[test]
     fn parses_jsonrpc_response_body_without_method() {
         let body = br#"{"jsonrpc":"2.0","id":1,"result":{"action":"accept","content":{}}}"#;
-        let info = parse_jsonrpc_body(body);
+        let info = parse_jsonrpc_body(body, JsonRpcInspectionMode::JsonRpc);
 
         assert!(info.calls.is_empty());
         assert!(!info.is_batch);
@@ -476,7 +472,7 @@ mod tests {
     fn parses_jsonrpc_error_response_body_without_method() {
         let body =
             br#"{"jsonrpc":"2.0","id":"request-1","error":{"code":-32603,"message":"failed"}}"#;
-        let info = parse_jsonrpc_body(body);
+        let info = parse_jsonrpc_body(body, JsonRpcInspectionMode::JsonRpc);
 
         assert!(info.calls.is_empty());
         assert!(info.has_response);
@@ -486,7 +482,7 @@ mod tests {
     #[test]
     fn flattens_object_params_for_policy_matching() {
         let body = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"submit_report","arguments":{"scope":"workspace/main"}}}"#;
-        let info = parse_jsonrpc_body(body);
+        let info = parse_jsonrpc_body(body, JsonRpcInspectionMode::JsonRpc);
         let params = &info.calls.first().expect("single request call").params;
         assert_eq!(
             params.get("name").map(String::as_str),
@@ -501,7 +497,7 @@ mod tests {
     #[test]
     fn mcp_mode_validates_known_methods_and_extracts_tool() {
         let body = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_web","arguments":{"query":"openshell"}}}"#;
-        let info = parse_mcp_body(body);
+        let info = parse_jsonrpc_body(body, JsonRpcInspectionMode::Mcp);
 
         assert!(info.error.is_none(), "expected valid MCP call: {info:?}");
         let call = info.calls.first().expect("single MCP call");
@@ -516,7 +512,7 @@ mod tests {
     #[test]
     fn mcp_mode_rejects_invalid_known_method_params() {
         let body = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"arguments":{"query":"openshell"}}}"#;
-        let info = parse_mcp_body(body);
+        let info = parse_jsonrpc_body(body, JsonRpcInspectionMode::Mcp);
 
         assert!(info.calls.is_empty());
         assert!(
@@ -531,7 +527,7 @@ mod tests {
     fn mcp_mode_allows_unknown_extension_methods() {
         let body =
             br#"{"jsonrpc":"2.0","id":1,"method":"vendor/extension","params":{"name":"custom"}}"#;
-        let info = parse_mcp_body(body);
+        let info = parse_jsonrpc_body(body, JsonRpcInspectionMode::Mcp);
 
         assert!(
             info.error.is_none(),
@@ -546,7 +542,7 @@ mod tests {
     #[test]
     fn rejects_literal_dotted_param_keys() {
         let body = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"arguments.scope":"workspace/other","arguments":{"scope":"workspace/main"}}}"#;
-        let info = parse_jsonrpc_body(body);
+        let info = parse_jsonrpc_body(body, JsonRpcInspectionMode::JsonRpc);
 
         assert!(info.calls.is_empty());
         assert!(
@@ -593,7 +589,7 @@ mod tests {
     #[test]
     fn rejects_requests_missing_jsonrpc_version() {
         let body = br#"{"id":1,"method":"tools/list"}"#;
-        let info = parse_jsonrpc_body(body);
+        let info = parse_jsonrpc_body(body, JsonRpcInspectionMode::JsonRpc);
 
         assert!(info.calls.is_empty());
         assert_eq!(
@@ -608,7 +604,7 @@ mod tests {
             {"jsonrpc":"2.0","id":1,"method":"tools/list"},
             {"id":2,"method":"tools/call","params":{"name":"read_status"}}
         ]"#;
-        let info = parse_jsonrpc_body(body);
+        let info = parse_jsonrpc_body(body, JsonRpcInspectionMode::JsonRpc);
 
         assert!(info.calls.is_empty());
         assert!(info.is_batch);
@@ -621,7 +617,7 @@ mod tests {
     #[test]
     fn rejects_unsupported_jsonrpc_version() {
         let body = br#"{"jsonrpc":"1.0","id":1,"method":"tools/list"}"#;
-        let info = parse_jsonrpc_body(body);
+        let info = parse_jsonrpc_body(body, JsonRpcInspectionMode::JsonRpc);
 
         assert!(info.calls.is_empty());
         assert_eq!(
@@ -646,7 +642,7 @@ mod tests {
             {"jsonrpc":"2.0","id":1,"method":"tools/list"},
             {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_status"}}
         ]"#;
-        let info = parse_jsonrpc_body(body);
+        let info = parse_jsonrpc_body(body, JsonRpcInspectionMode::JsonRpc);
         assert!(info.error.is_none());
         assert!(info.is_batch);
         assert!(!info.has_response);
@@ -665,7 +661,7 @@ mod tests {
             {"jsonrpc":"2.0","id":1,"method":"tools/list"},
             {"jsonrpc":"2.0","id":2,"result":{"ok":true}}
         ]"#;
-        let info = parse_jsonrpc_body(body);
+        let info = parse_jsonrpc_body(body, JsonRpcInspectionMode::JsonRpc);
 
         assert!(info.error.is_none());
         assert!(info.is_batch);
@@ -678,7 +674,7 @@ mod tests {
     fn rejects_invalid_jsonrpc_response_body() {
         let body =
             br#"{"jsonrpc":"2.0","id":1,"result":{},"error":{"code":-32603,"message":"failed"}}"#;
-        let info = parse_jsonrpc_body(body);
+        let info = parse_jsonrpc_body(body, JsonRpcInspectionMode::JsonRpc);
 
         assert!(info.calls.is_empty());
         assert!(!info.has_response);
@@ -691,7 +687,7 @@ mod tests {
     #[test]
     fn rejects_message_with_method_and_result_or_error() {
         let result_body = br#"{"jsonrpc":"2.0","id":1,"method":"initialize","result":{}}"#;
-        let result_info = parse_jsonrpc_body(result_body);
+        let result_info = parse_jsonrpc_body(result_body, JsonRpcInspectionMode::JsonRpc);
         assert!(result_info.calls.is_empty());
         assert_eq!(
             result_info.error.as_deref(),
@@ -699,7 +695,7 @@ mod tests {
         );
 
         let error_body = br#"{"jsonrpc":"2.0","id":1,"method":"initialize","error":{"code":-32603,"message":"failed"}}"#;
-        let error_info = parse_jsonrpc_body(error_body);
+        let error_info = parse_jsonrpc_body(error_body, JsonRpcInspectionMode::JsonRpc);
         assert!(error_info.calls.is_empty());
         assert_eq!(
             error_info.error.as_deref(),
@@ -713,7 +709,7 @@ mod tests {
             {"jsonrpc":"2.0","id":1,"method":"tools/list"},
             {"jsonrpc":"2.0","id":2,"method":"initialize","result":{}}
         ]"#;
-        let info = parse_jsonrpc_body(body);
+        let info = parse_jsonrpc_body(body, JsonRpcInspectionMode::JsonRpc);
 
         assert!(info.calls.is_empty());
         assert!(info.is_batch);
@@ -727,12 +723,15 @@ mod tests {
     fn params_digest_is_canonical_and_redacted() {
         let first = parse_jsonrpc_body(
             br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"submit_report","arguments":{"scope":"workspace/main"}}}"#,
+            JsonRpcInspectionMode::JsonRpc,
         );
         let reordered = parse_jsonrpc_body(
             br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"arguments":{"scope":"workspace/main"},"name":"submit_report"}}"#,
+            JsonRpcInspectionMode::JsonRpc,
         );
         let changed = parse_jsonrpc_body(
             br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"submit_report","arguments":{"scope":"workspace/other"}}}"#,
+            JsonRpcInspectionMode::JsonRpc,
         );
 
         let digest = first.params_sha256().expect("params digest");
@@ -751,12 +750,14 @@ mod tests {
                 {"jsonrpc":"2.0","id":1,"method":"tools/list"},
                 {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"blocked_action"}}
             ]"#,
+            JsonRpcInspectionMode::JsonRpc,
         );
         let empty_batch = parse_jsonrpc_body(
             br#"[
                 {"jsonrpc":"2.0","id":1,"method":"tools/list"},
                 {"jsonrpc":"2.0","id":2,"method":"initialize"}
             ]"#,
+            JsonRpcInspectionMode::JsonRpc,
         );
 
         let digest = batch.params_sha256().expect("batch params digest");
