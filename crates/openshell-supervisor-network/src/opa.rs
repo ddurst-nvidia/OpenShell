@@ -899,6 +899,8 @@ fn normalize_l7_rule_aliases(rule: &mut serde_json::Map<String, serde_json::Valu
     normalize_jsonrpc_params(rule);
 }
 
+// Raw JSON/YAML policy data reaches Rego without the typed policy conversion
+// path, so flatten nested JSON-RPC/MCP params here as the serializer does.
 fn normalize_jsonrpc_params(rule: &mut serde_json::Map<String, serde_json::Value>) {
     let Some(params) = rule
         .get_mut("params")
@@ -914,6 +916,8 @@ fn normalize_jsonrpc_params(rule: &mut serde_json::Map<String, serde_json::Value
     *params = flattened;
 }
 
+// Treat `{glob: ...}` and `{any: [...]}` as matcher leaves. Other objects are
+// nested params maps and become dot-path keys for the Rego matcher table.
 fn flatten_jsonrpc_param_matcher(
     key: &str,
     matcher: serde_json::Value,
@@ -934,6 +938,8 @@ fn flatten_jsonrpc_param_matcher(
     }
 }
 
+// A matcher object is identified by the reserved matcher keys; objects without
+// those keys are interpreted as nested params maps by the normalizer.
 fn is_jsonrpc_matcher_object(obj: &serde_json::Map<String, serde_json::Value>) -> bool {
     obj.contains_key("any") || obj.contains_key("glob")
 }

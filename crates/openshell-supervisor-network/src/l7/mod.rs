@@ -491,10 +491,15 @@ fn validate_graphql_rule(
 
 #[derive(Clone, Copy)]
 enum MatcherNesting {
+    // REST query matchers are a flat map: each key maps directly to a matcher.
     Flat,
+    // JSON-RPC/MCP params may use nested maps that flatten into dot-path keys
+    // before Rego evaluation.
     Nested,
 }
 
+// Validate a matcher map when it exists. Null is treated like omission because
+// policy loading normalizes absent optional maps the same way.
 fn validate_matcher_map(
     errors: &mut Vec<String>,
     warnings: &mut Vec<String>,
@@ -515,6 +520,8 @@ fn validate_matcher_map(
     }
 }
 
+// Validate one matcher leaf. In nested mode, an object without `glob` or `any`
+// is treated as another params namespace and walked recursively.
 fn validate_matcher_value(
     errors: &mut Vec<String>,
     warnings: &mut Vec<String>,
@@ -604,6 +611,8 @@ fn validate_matcher_value(
     }
 }
 
+// Keep the leaf-shape error specific to the policy surface being validated:
+// REST query maps cannot nest, while JSON-RPC/MCP params maps can.
 fn matcher_expected_message(nesting: MatcherNesting) -> &'static str {
     match nesting {
         MatcherNesting::Flat => "expected string glob or matcher object",
@@ -611,6 +620,10 @@ fn matcher_expected_message(nesting: MatcherNesting) -> &'static str {
     }
 }
 
+// Validate the shared JSON-RPC-family rule surface. The protocol decides
+// whether `method`/nested `params` are legal and required: JSON-RPC/MCP rules
+// require a non-empty method, validate params with the nested matcher walker,
+// and reject REST path/query fields; other protocols reject params entirely.
 fn validate_jsonrpc_rule_fields(
     errors: &mut Vec<String>,
     warnings: &mut Vec<String>,

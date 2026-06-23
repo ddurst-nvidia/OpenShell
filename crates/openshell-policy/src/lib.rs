@@ -306,6 +306,8 @@ fn param_matcher_glob(glob: String) -> ParamMatcherDef {
     ParamMatcherDef::Matcher(matcher_glob(glob))
 }
 
+// Convert user-authored nested params maps into the flat proto/Rego keyspace.
+// For example, `arguments: { scope: "x" }` becomes `arguments.scope`.
 fn flatten_param_matchers(
     params: BTreeMap<String, ParamMatcherDef>,
 ) -> BTreeMap<String, QueryMatcherDef> {
@@ -316,6 +318,8 @@ fn flatten_param_matchers(
     flattened
 }
 
+// Walk one params subtree, carrying the flattened dot-path key accumulated so
+// far. Leaf matchers are inserted into the map consumed by the runtime policy.
 fn flatten_param_matcher(
     key: &str,
     matcher: ParamMatcherDef,
@@ -334,6 +338,8 @@ fn flatten_param_matcher(
     }
 }
 
+// Convert flat runtime params back to YAML. MCP gets readable nested params
+// when the flat keys can be losslessly split; generic JSON-RPC keeps flat keys.
 fn flat_params_to_def(
     protocol: &str,
     params: BTreeMap<String, QueryMatcherDef>,
@@ -364,6 +370,8 @@ fn flat_param_matchers_to_def(
         .collect()
 }
 
+// Build one nested params path from a flat key. Collisions such as `a` and
+// `a.b` cannot round-trip as nested YAML, so callers fall back to the flat map.
 fn insert_nested_param(
     root: &mut BTreeMap<String, ParamMatcherDef>,
     key: &str,
