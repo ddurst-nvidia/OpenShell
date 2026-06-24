@@ -456,12 +456,41 @@ request_allowed_for_endpoint(request, endpoint) if {
 	jsonrpc_rule_matches(request, rule.allow)
 }
 
+# MCP can allow the method layer by endpoint option while still using
+# tool-specific rules to narrow tools/call params.name.
+request_allowed_for_endpoint(request, endpoint) if {
+	endpoint.protocol == "mcp"
+	mcp_allow_all_known_mcp_methods(endpoint)
+	request.method == "POST"
+	not jsonrpc_response_frame_present(request)
+	jsonrpc := object.get(request, "jsonrpc", null)
+	is_object(jsonrpc)
+	jsonrpc_no_parse_error(jsonrpc)
+	method := object.get(jsonrpc, "method", "")
+	is_string(method)
+	method != ""
+	not mcp_tool_call_narrowed_by_policy(endpoint, method)
+}
+
 jsonrpc_family_endpoint(endpoint) if {
 	endpoint.protocol == "json-rpc"
 }
 
 jsonrpc_family_endpoint(endpoint) if {
 	endpoint.protocol == "mcp"
+}
+
+mcp_allow_all_known_mcp_methods(endpoint) if {
+	object.get(endpoint, "mcp_allow_all_known_mcp_methods", true)
+}
+
+mcp_tool_call_narrowed_by_policy(endpoint, method) if {
+	method == "tools/call"
+	some rule
+	rule := endpoint.rules[_]
+	params := object.get(rule.allow, "params", {})
+	is_object(params)
+	params.name
 }
 
 # MCP Streamable HTTP uses GET on the JSON-RPC-family endpoint as a receive

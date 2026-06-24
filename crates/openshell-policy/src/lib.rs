@@ -19,7 +19,7 @@ use std::path::Path;
 use miette::{IntoDiagnostic, Result, WrapErr};
 use openshell_core::proto::{
     FilesystemPolicy, GraphqlOperation, L7Allow, L7DenyRule, L7QueryMatcher, L7Rule,
-    LandlockPolicy, NetworkBinary, NetworkEndpoint, NetworkPolicyRule, ProcessPolicy,
+    LandlockPolicy, McpOptions, NetworkBinary, NetworkEndpoint, NetworkPolicyRule, ProcessPolicy,
     SandboxPolicy,
 };
 use serde::{Deserialize, Serialize};
@@ -174,16 +174,19 @@ struct McpConfigDef {
     max_body_bytes: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     strict_tool_names: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    allow_all_known_mcp_methods: Option<bool>,
 }
 
-fn mcp_config_from_proto(
-    max_body_bytes: u32,
-    strict_tool_names: Option<bool>,
-) -> Option<McpConfigDef> {
-    (max_body_bytes > 0 || strict_tool_names.is_some()).then_some(McpConfigDef {
-        max_body_bytes,
-        strict_tool_names,
-    })
+fn mcp_config_from_proto(max_body_bytes: u32, mcp: Option<&McpOptions>) -> Option<McpConfigDef> {
+    let strict_tool_names = mcp.and_then(|config| config.strict_tool_names);
+    let allow_all_known_mcp_methods = mcp.and_then(|config| config.allow_all_known_mcp_methods);
+    (max_body_bytes > 0 || strict_tool_names.is_some() || allow_all_known_mcp_methods.is_some())
+        .then_some(McpConfigDef {
+            max_body_bytes,
+            strict_tool_names,
+            allow_all_known_mcp_methods,
+        })
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -220,8 +223,8 @@ struct L7AllowDef {
     operation_name: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     fields: Vec<String>,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    tool: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool: Option<QueryMatcherDef>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     params: BTreeMap<String, ParamMatcherDef>,
 }
@@ -268,8 +271,8 @@ struct L7DenyRuleDef {
     operation_name: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     fields: Vec<String>,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    tool: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool: Option<QueryMatcherDef>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     params: BTreeMap<String, ParamMatcherDef>,
 }
@@ -304,14 +307,6 @@ fn matcher_proto_to_def(matcher: L7QueryMatcher) -> QueryMatcherDef {
     } else {
         QueryMatcherDef::Any(QueryAnyDef { any: matcher.any })
     }
-}
-
-fn matcher_glob(glob: String) -> QueryMatcherDef {
-    QueryMatcherDef::Glob(glob)
-}
-
-fn param_matcher_glob(glob: String) -> ParamMatcherDef {
-    ParamMatcherDef::Matcher(matcher_glob(glob))
 }
 
 // Convert user-authored nested params maps into the flat proto/Rego keyspace.
@@ -406,20 +401,51 @@ fn insert_nested_param(
 }
 
 // MCP `tool` is a policy convenience for the standard `tools/call` params.name
-// field. It only fills the matcher when the caller did not set `params.name`.
+// field. When the endpoint method profile is enabled, authored tool selectors
+// can omit method and are normalized to tools/call internally. Tool arguments
+// intentionally have no policy matcher yet, so every allowed tool call permits
+// all argument payloads by default.
 fn params_with_tool(
+    protocol: &str,
+    method: &mut String,
     mut params: BTreeMap<String, ParamMatcherDef>,
-    tool: String,
+    tool: Option<QueryMatcherDef>,
+    mcp_allow_all_known_mcp_methods: bool,
 ) -> BTreeMap<String, ParamMatcherDef> {
-    if !tool.is_empty() {
+    let has_tool = tool.is_some();
+    if let Some(tool) = tool {
+        if is_mcp_protocol(protocol) && method.is_empty() && mcp_allow_all_known_mcp_methods {
+            *method = "tools/call".to_string();
+        }
         params
             .entry("name".to_string())
-            .or_insert_with(|| param_matcher_glob(tool));
+            .or_insert_with(|| ParamMatcherDef::Matcher(tool));
+    }
+    if is_mcp_protocol(protocol)
+        && method.is_empty()
+        && !has_tool
+        && mcp_allow_all_known_mcp_methods
+    {
+        // Until OpenShell has explicit MCP version profiles, an omitted MCP
+        // method is the policy-level "allow all MCP-ish methods" form. Rego
+        // uses `*` as the runtime wildcard.
+        *method = "*".to_string();
     }
     params
 }
 
-fn allow_def_to_proto(_protocol: &str, allow: L7AllowDef) -> L7Allow {
+fn allow_def_to_proto(
+    protocol: &str,
+    mut allow: L7AllowDef,
+    mcp_allow_all_known_mcp_methods: bool,
+) -> L7Allow {
+    let params = flatten_param_matchers(params_with_tool(
+        protocol,
+        &mut allow.method,
+        allow.params,
+        allow.tool,
+        mcp_allow_all_known_mcp_methods,
+    ));
     L7Allow {
         method: allow.method,
         path: allow.path,
@@ -432,14 +458,25 @@ fn allow_def_to_proto(_protocol: &str, allow: L7AllowDef) -> L7Allow {
             .into_iter()
             .map(|(key, matcher)| (key, matcher_def_to_proto(matcher)))
             .collect(),
-        params: flatten_param_matchers(params_with_tool(allow.params, allow.tool))
+        params: params
             .into_iter()
             .map(|(key, matcher)| (key, matcher_def_to_proto(matcher)))
             .collect(),
     }
 }
 
-fn deny_def_to_proto(_protocol: &str, deny: L7DenyRuleDef) -> L7DenyRule {
+fn deny_def_to_proto(
+    protocol: &str,
+    mut deny: L7DenyRuleDef,
+    mcp_allow_all_known_mcp_methods: bool,
+) -> L7DenyRule {
+    let params = flatten_param_matchers(params_with_tool(
+        protocol,
+        &mut deny.method,
+        deny.params,
+        deny.tool,
+        mcp_allow_all_known_mcp_methods,
+    ));
     L7DenyRule {
         method: deny.method,
         path: deny.path,
@@ -452,7 +489,7 @@ fn deny_def_to_proto(_protocol: &str, deny: L7DenyRuleDef) -> L7DenyRule {
             .into_iter()
             .map(|(key, matcher)| (key, matcher_def_to_proto(matcher)))
             .collect(),
-        params: flatten_param_matchers(params_with_tool(deny.params, deny.tool))
+        params: params
             .into_iter()
             .map(|(key, matcher)| (key, matcher_def_to_proto(matcher)))
             .collect(),
@@ -472,6 +509,20 @@ fn mcp_strict_tool_names(mcp: &Option<McpConfigDef>) -> Option<bool> {
     mcp.as_ref().and_then(|config| config.strict_tool_names)
 }
 
+fn mcp_allow_all_known_mcp_methods(mcp: &Option<McpConfigDef>) -> Option<bool> {
+    mcp.as_ref()
+        .and_then(|config| config.allow_all_known_mcp_methods)
+}
+
+fn mcp_options(mcp: &Option<McpConfigDef>) -> Option<McpOptions> {
+    let strict_tool_names = mcp_strict_tool_names(mcp);
+    let allow_all_known_mcp_methods = mcp_allow_all_known_mcp_methods(mcp);
+    (strict_tool_names.is_some() || allow_all_known_mcp_methods.is_some()).then_some(McpOptions {
+        strict_tool_names,
+        allow_all_known_mcp_methods,
+    })
+}
+
 fn is_mcp_protocol(protocol: &str) -> bool {
     protocol.eq_ignore_ascii_case("mcp")
 }
@@ -479,26 +530,23 @@ fn is_mcp_protocol(protocol: &str) -> bool {
 fn split_tool_param(
     protocol: &str,
     params: BTreeMap<String, QueryMatcherDef>,
-) -> (String, BTreeMap<String, QueryMatcherDef>) {
+) -> (Option<QueryMatcherDef>, BTreeMap<String, QueryMatcherDef>) {
     // Only MCP has the tool-name convention. Generic JSON-RPC keeps `name` as a
     // normal params matcher so serialization does not invent MCP semantics.
     if !is_mcp_protocol(protocol) {
-        return (String::new(), params);
+        return (None, params);
     }
 
     let mut params = params;
-    let tool = match params.remove("name") {
-        Some(QueryMatcherDef::Glob(glob)) => glob,
-        Some(other) => {
-            params.insert("name".to_string(), other);
-            String::new()
-        }
-        None => String::new(),
-    };
+    let tool = params.remove("name");
     (tool, params)
 }
 
-fn allow_proto_to_def(protocol: &str, allow: L7Allow) -> L7AllowDef {
+fn allow_proto_to_def(
+    protocol: &str,
+    allow: L7Allow,
+    mcp_allow_all_known_mcp_methods: bool,
+) -> L7AllowDef {
     let params: BTreeMap<String, QueryMatcherDef> = allow
         .params
         .into_iter()
@@ -506,8 +554,14 @@ fn allow_proto_to_def(protocol: &str, allow: L7Allow) -> L7AllowDef {
         .collect();
     let (tool, params) = split_tool_param(protocol, params);
     let params = flat_params_to_def(protocol, params);
+    let method = yaml_mcp_method(
+        protocol,
+        &allow.method,
+        tool.is_some(),
+        mcp_allow_all_known_mcp_methods,
+    );
     L7AllowDef {
-        method: allow.method,
+        method,
         path: allow.path,
         command: allow.command,
         query: allow
@@ -523,7 +577,11 @@ fn allow_proto_to_def(protocol: &str, allow: L7Allow) -> L7AllowDef {
     }
 }
 
-fn deny_proto_to_def(protocol: &str, deny: &L7DenyRule) -> L7DenyRuleDef {
+fn deny_proto_to_def(
+    protocol: &str,
+    deny: &L7DenyRule,
+    mcp_allow_all_known_mcp_methods: bool,
+) -> L7DenyRuleDef {
     let params: BTreeMap<String, QueryMatcherDef> = deny
         .params
         .iter()
@@ -531,8 +589,14 @@ fn deny_proto_to_def(protocol: &str, deny: &L7DenyRule) -> L7DenyRuleDef {
         .collect();
     let (tool, params) = split_tool_param(protocol, params);
     let params = flat_params_to_def(protocol, params);
+    let method = yaml_mcp_method(
+        protocol,
+        &deny.method,
+        tool.is_some(),
+        mcp_allow_all_known_mcp_methods,
+    );
     L7DenyRuleDef {
-        method: deny.method.clone(),
+        method,
         path: deny.path.clone(),
         command: deny.command.clone(),
         query: deny
@@ -546,6 +610,23 @@ fn deny_proto_to_def(protocol: &str, deny: &L7DenyRule) -> L7DenyRuleDef {
         tool,
         params,
     }
+}
+
+fn yaml_mcp_method(
+    protocol: &str,
+    method: &str,
+    has_tool: bool,
+    mcp_allow_all_known_mcp_methods: bool,
+) -> String {
+    if is_mcp_protocol(protocol) {
+        if !has_tool && method == "*" {
+            return String::new();
+        }
+        if has_tool && method == "tools/call" && mcp_allow_all_known_mcp_methods {
+            return String::new();
+        }
+    }
+    method.to_string()
 }
 
 fn to_proto(raw: PolicyFile) -> SandboxPolicy {
@@ -566,6 +647,8 @@ fn to_proto(raw: PolicyFile) -> SandboxPolicy {
                         let protocol = e.protocol;
                         let allow_rules = e.rules;
                         let deny_rules = e.deny_rules;
+                        let mcp_allow_all_known_mcp_methods = !is_mcp_protocol(&protocol)
+                            || mcp_allow_all_known_mcp_methods(&e.mcp).unwrap_or(true);
                         // Normalize port/ports: ports takes precedence, else
                         // single port is promoted to ports array.
                         let normalized_ports: Vec<u32> = if !e.ports.is_empty() {
@@ -587,13 +670,23 @@ fn to_proto(raw: PolicyFile) -> SandboxPolicy {
                             rules: allow_rules
                                 .into_iter()
                                 .map(|r| L7Rule {
-                                    allow: Some(allow_def_to_proto(&protocol, r.allow)),
+                                    allow: Some(allow_def_to_proto(
+                                        &protocol,
+                                        r.allow,
+                                        mcp_allow_all_known_mcp_methods,
+                                    )),
                                 })
                                 .collect(),
                             allowed_ips: e.allowed_ips,
                             deny_rules: deny_rules
                                 .into_iter()
-                                .map(|deny| deny_def_to_proto(&protocol, deny))
+                                .map(|deny| {
+                                    deny_def_to_proto(
+                                        &protocol,
+                                        deny,
+                                        mcp_allow_all_known_mcp_methods,
+                                    )
+                                })
                                 .collect(),
                             allow_encoded_slash: e.allow_encoded_slash,
                             websocket_credential_rewrite: e.websocket_credential_rewrite,
@@ -618,7 +711,7 @@ fn to_proto(raw: PolicyFile) -> SandboxPolicy {
                                 .collect(),
                             graphql_max_body_bytes: e.graphql_max_body_bytes,
                             json_rpc_max_body_bytes: json_rpc_max_body_bytes(&e.json_rpc, &e.mcp),
-                            mcp_strict_tool_names: mcp_strict_tool_names(&e.mcp),
+                            mcp: mcp_options(&e.mcp),
                         }
                     })
                     .collect(),
@@ -699,6 +792,11 @@ fn from_proto(policy: &SandboxPolicy) -> PolicyFile {
                             (clamp(e.ports.first().copied().unwrap_or(e.port)), vec![])
                         };
                         let protocol = e.protocol.clone();
+                        let mcp_allow_all_known_mcp_methods = !is_mcp_protocol(&protocol)
+                            || e.mcp
+                                .as_ref()
+                                .and_then(|options| options.allow_all_known_mcp_methods)
+                                .unwrap_or(true);
                         let rules = e
                             .rules
                             .iter()
@@ -706,21 +804,21 @@ fn from_proto(policy: &SandboxPolicy) -> PolicyFile {
                                 allow: allow_proto_to_def(
                                     &protocol,
                                     r.allow.clone().unwrap_or_default(),
+                                    mcp_allow_all_known_mcp_methods,
                                 ),
                             })
                             .collect();
                         let deny_rules: Vec<L7DenyRuleDef> = e
                             .deny_rules
                             .iter()
-                            .map(|d| deny_proto_to_def(&protocol, d))
+                            .map(|d| {
+                                deny_proto_to_def(&protocol, d, mcp_allow_all_known_mcp_methods)
+                            })
                             .collect();
                         let (json_rpc, mcp) = if is_mcp_protocol(&protocol) {
                             (
                                 None,
-                                mcp_config_from_proto(
-                                    e.json_rpc_max_body_bytes,
-                                    e.mcp_strict_tool_names,
-                                ),
+                                mcp_config_from_proto(e.json_rpc_max_body_bytes, e.mcp.as_ref()),
                             )
                         } else {
                             (json_rpc_config_from_proto(e.json_rpc_max_body_bytes), None)
@@ -1990,6 +2088,7 @@ network_policies:
         mcp:
           max_body_bytes: 131072
           strict_tool_names: false
+          allow_all_known_mcp_methods: false
         rules:
           - allow:
               method: initialize
@@ -1997,10 +2096,8 @@ network_policies:
               method: tools/list
           - allow:
               method: tools/call
-              tool: search_web
-              params:
-                arguments:
-                  repository: NVIDIA/OpenShell
+              tool:
+                any: [search_web, list_tools]
         deny_rules:
           - method: tools/call
             tool: send_email
@@ -2012,16 +2109,23 @@ network_policies:
 
         assert_eq!(ep.protocol, "mcp");
         assert_eq!(ep.json_rpc_max_body_bytes, 131_072);
-        assert_eq!(ep.mcp_strict_tool_names, Some(false));
+        assert_eq!(
+            ep.mcp
+                .as_ref()
+                .and_then(|options| options.strict_tool_names),
+            Some(false)
+        );
+        assert_eq!(
+            ep.mcp
+                .as_ref()
+                .and_then(|options| options.allow_all_known_mcp_methods),
+            Some(false)
+        );
         assert_eq!(ep.rules.len(), 3);
         assert_eq!(ep.rules[2].allow.as_ref().unwrap().method, "tools/call");
         assert_eq!(
-            ep.rules[2].allow.as_ref().unwrap().params["name"].glob,
-            "search_web"
-        );
-        assert_eq!(
-            ep.rules[2].allow.as_ref().unwrap().params["arguments.repository"].glob,
-            "NVIDIA/OpenShell"
+            ep.rules[2].allow.as_ref().unwrap().params["name"].any,
+            vec!["search_web".to_string(), "list_tools".to_string()]
         );
         assert_eq!(ep.deny_rules.len(), 1);
         assert_eq!(ep.deny_rules[0].method, "tools/call");
@@ -2042,16 +2146,15 @@ network_policies:
         mcp:
           max_body_bytes: 131072
           strict_tool_names: false
+          allow_all_known_mcp_methods: false
         rules:
           - allow:
               method: tools/call
               tool: search_web
-              params:
-                arguments:
-                  repository: NVIDIA/OpenShell
         deny_rules:
           - method: tools/call
-            tool: send_email
+            tool:
+              any: [send_email, delete_resource]
     binaries:
       - path: /usr/bin/curl
 ";
@@ -2062,13 +2165,14 @@ network_policies:
         assert!(yaml_out.contains("protocol: mcp"));
         assert!(yaml_out.contains("method: tools/call"));
         assert!(yaml_out.contains("tool: search_web"));
-        assert!(yaml_out.contains("tool: send_email"));
+        assert!(yaml_out.contains("any:"));
+        assert!(yaml_out.contains("- send_email"));
+        assert!(yaml_out.contains("- delete_resource"));
         assert!(yaml_out.contains("deny_rules:"));
-        assert!(yaml_out.contains("arguments:"));
-        assert!(yaml_out.contains("repository: NVIDIA/OpenShell"));
-        assert!(!yaml_out.contains("arguments.repository"));
+        assert!(!yaml_out.contains("arguments:"));
         assert!(yaml_out.contains("mcp:"));
         assert!(yaml_out.contains("strict_tool_names: false"));
+        assert!(yaml_out.contains("allow_all_known_mcp_methods: false"));
         assert_eq!(proto1, proto2);
     }
 

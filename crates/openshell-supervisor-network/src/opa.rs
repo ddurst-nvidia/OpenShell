@@ -218,6 +218,8 @@ impl OpaEngine {
             ));
         }
 
+        normalize_l7_policy_rule_aliases(&mut data);
+
         // Expand access presets to explicit rules after validation
         crate::l7::expand_access_presets(&mut data);
 
@@ -743,7 +745,7 @@ fn preprocess_yaml_data(yaml_str: &str) -> Result<String> {
 
     // Normalize port → ports for all endpoints so Rego always sees "ports" array.
     normalize_endpoint_ports(&mut data);
-    normalize_l7_policy_aliases(&mut data);
+    normalize_l7_config_aliases(&mut data);
 
     // Validate BEFORE expanding presets (catches user errors like rules+access)
     let (errors, warnings) = crate::l7::validate_l7_policies(&data);
@@ -764,6 +766,8 @@ fn preprocess_yaml_data(yaml_str: &str) -> Result<String> {
             errors.join("\n")
         ));
     }
+
+    normalize_l7_policy_rule_aliases(&mut data);
 
     // Expand access presets to explicit rules after validation
     crate::l7::expand_access_presets(&mut data);
@@ -820,7 +824,7 @@ fn normalize_endpoint_ports(data: &mut serde_json::Value) {
     }
 }
 
-fn normalize_l7_policy_aliases(data: &mut serde_json::Value) {
+fn normalize_l7_config_aliases(data: &mut serde_json::Value) {
     let Some(policies) = data
         .get_mut("network_policies")
         .and_then(|v| v.as_object_mut())
@@ -839,6 +843,27 @@ fn normalize_l7_policy_aliases(data: &mut serde_json::Value) {
             };
             normalize_jsonrpc_config_alias(ep_obj, "json_rpc");
             normalize_jsonrpc_config_alias(ep_obj, "mcp");
+        }
+    }
+}
+
+fn normalize_l7_policy_rule_aliases(data: &mut serde_json::Value) {
+    let Some(policies) = data
+        .get_mut("network_policies")
+        .and_then(|v| v.as_object_mut())
+    else {
+        return;
+    };
+
+    for (_name, policy) in policies.iter_mut() {
+        let Some(endpoints) = policy.get_mut("endpoints").and_then(|v| v.as_array_mut()) else {
+            continue;
+        };
+
+        for ep in endpoints.iter_mut() {
+            let Some(ep_obj) = ep.as_object_mut() else {
+                continue;
+            };
             normalize_l7_rules_aliases(ep_obj);
         }
     }
@@ -864,18 +889,33 @@ fn normalize_jsonrpc_config_alias(ep: &mut serde_json::Map<String, serde_json::V
         ep.entry("mcp_strict_tool_names".to_string())
             .or_insert_with(|| strict_tool_names.clone());
     }
+    if key == "mcp"
+        && let Some(allow_all_known_mcp_methods) = config_obj.get("allow_all_known_mcp_methods")
+    {
+        ep.entry("mcp_allow_all_known_mcp_methods".to_string())
+            .or_insert_with(|| allow_all_known_mcp_methods.clone());
+    }
 }
 
 fn normalize_l7_rules_aliases(ep: &mut serde_json::Map<String, serde_json::Value>) {
+    let protocol = ep
+        .get("protocol")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let mcp_allow_all_known_mcp_methods = ep
+        .get("mcp_allow_all_known_mcp_methods")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
     if let Some(rules) = ep.get_mut("rules").and_then(|v| v.as_array_mut()) {
         for rule in rules {
             if let Some(allow) = rule
                 .get_mut("allow")
                 .and_then(serde_json::Value::as_object_mut)
             {
-                normalize_l7_rule_aliases(allow);
+                normalize_l7_rule_aliases(allow, &protocol, mcp_allow_all_known_mcp_methods);
             } else if let Some(allow) = rule.as_object_mut() {
-                normalize_l7_rule_aliases(allow);
+                normalize_l7_rule_aliases(allow, &protocol, mcp_allow_all_known_mcp_methods);
             }
         }
     }
@@ -883,14 +923,47 @@ fn normalize_l7_rules_aliases(ep: &mut serde_json::Map<String, serde_json::Value
     if let Some(denies) = ep.get_mut("deny_rules").and_then(|v| v.as_array_mut()) {
         for deny in denies {
             if let Some(deny_obj) = deny.as_object_mut() {
-                normalize_l7_rule_aliases(deny_obj);
+                normalize_l7_rule_aliases(deny_obj, &protocol, mcp_allow_all_known_mcp_methods);
             }
         }
     }
 }
 
-fn normalize_l7_rule_aliases(rule: &mut serde_json::Map<String, serde_json::Value>) {
-    if let Some(tool) = rule.remove("tool")
+fn normalize_l7_rule_aliases(
+    rule: &mut serde_json::Map<String, serde_json::Value>,
+    protocol: &str,
+    mcp_allow_all_known_mcp_methods: bool,
+) {
+    if protocol == "mcp" {
+        let mut has_tool_selector = rule
+            .get("params")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|params| params.get("name"))
+            .is_some_and(|v| !v.is_null());
+        if let Some(tool) = rule.remove("tool").filter(|v| !v.is_null()) {
+            let params = rule
+                .entry("params".to_string())
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            if let Some(params) = params.as_object_mut() {
+                params.entry("name".to_string()).or_insert(tool);
+                has_tool_selector = true;
+            }
+        }
+
+        if mcp_allow_all_known_mcp_methods
+            && rule
+                .get("method")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .is_empty()
+        {
+            let method = if has_tool_selector { "tools/call" } else { "*" };
+            rule.insert(
+                "method".to_string(),
+                serde_json::Value::String(method.to_string()),
+            );
+        }
+    } else if let Some(tool) = rule.remove("tool")
         && let Some(tool_name) = tool.as_str().filter(|s| !s.is_empty())
     {
         let params = rule
@@ -1294,8 +1367,14 @@ fn proto_to_opa_data_json(proto: &ProtoSandboxPolicy, entrypoint_pid: u32) -> St
                     if e.json_rpc_max_body_bytes > 0 {
                         ep["json_rpc_max_body_bytes"] = e.json_rpc_max_body_bytes.into();
                     }
-                    if let Some(strict_tool_names) = e.mcp_strict_tool_names {
-                        ep["mcp_strict_tool_names"] = strict_tool_names.into();
+                    if let Some(mcp) = &e.mcp {
+                        if let Some(strict_tool_names) = mcp.strict_tool_names {
+                            ep["mcp_strict_tool_names"] = strict_tool_names.into();
+                        }
+                        if let Some(allow_all_known_mcp_methods) = mcp.allow_all_known_mcp_methods {
+                            ep["mcp_allow_all_known_mcp_methods"] =
+                                allow_all_known_mcp_methods.into();
+                        }
                     }
                     ep
                 })
@@ -3236,18 +3315,10 @@ network_policies:
           max_body_bytes: 131072
         rules:
           - allow:
-              method: initialize
-          - allow:
-              method: tools/list
-          - allow:
-              method: tools/call
-              tool: read_status
-              params:
-                arguments:
-                  scope: workspace/main
+              tool:
+                any: [read_status, submit_*]
         deny_rules:
-          - method: tools/call
-            tool: blocked_action
+          - tool: blocked_action
     binaries:
       - { path: /usr/bin/curl }
 "#;
@@ -3265,7 +3336,7 @@ network_policies:
         );
         assert!(eval_l7(&engine, &read_status));
 
-        let wrong_scope = l7_jsonrpc_input_with_params(
+        let read_status_any_args = l7_jsonrpc_input_with_params(
             "mcp.params.test",
             8000,
             "/mcp",
@@ -3275,7 +3346,16 @@ network_policies:
                 "arguments.scope": "workspace/other"
             }),
         );
-        assert!(!eval_l7(&engine, &wrong_scope));
+        assert!(eval_l7(&engine, &read_status_any_args));
+
+        let submit_report = l7_jsonrpc_input_with_params(
+            "mcp.params.test",
+            8000,
+            "/mcp",
+            "tools/call",
+            serde_json::json!({"name": "submit_report"}),
+        );
+        assert!(eval_l7(&engine, &submit_report));
 
         let blocked = l7_jsonrpc_input_with_params(
             "mcp.params.test",
@@ -3285,6 +3365,42 @@ network_policies:
             serde_json::json!({"name": "blocked_action"}),
         );
         assert!(!eval_l7(&engine, &blocked));
+
+        let list_tools = l7_jsonrpc_input("mcp.params.test", 8000, "/mcp", "tools/list");
+        assert!(eval_l7(&engine, &list_tools));
+    }
+
+    #[test]
+    fn l7_mcp_endpoint_defaults_to_allow_all_tools() {
+        let data = r#"
+network_policies:
+  mcp_default:
+    name: mcp_default
+    endpoints:
+      - host: mcp.default.test
+        port: 8000
+        path: /mcp
+        protocol: mcp
+        enforcement: enforce
+    binaries:
+      - { path: /usr/bin/curl }
+"#;
+        let engine = OpaEngine::from_strings(TEST_POLICY, data).expect("engine from yaml");
+
+        let tool_call = l7_jsonrpc_input_with_params(
+            "mcp.default.test",
+            8000,
+            "/mcp",
+            "tools/call",
+            serde_json::json!({
+                "name": "any_tool",
+                "arguments.scope": "workspace/other"
+            }),
+        );
+        assert!(eval_l7(&engine, &tool_call));
+
+        let list_tools = l7_jsonrpc_input("mcp.default.test", 8000, "/mcp", "tools/list");
+        assert!(eval_l7(&engine, &list_tools));
     }
 
     #[test]

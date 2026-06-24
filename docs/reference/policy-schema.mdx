@@ -158,7 +158,7 @@ Each endpoint defines a reachable destination and optional inspection rules.
 | `protocol` | string | No | Set to `rest` for HTTP method/path inspection, `websocket` for RFC 6455 upgrade and client text-message inspection, `graphql` for GraphQL-over-HTTP operation inspection, `mcp` for MCP Streamable HTTP request inspection, or `json-rpc` for generic JSON-RPC-over-HTTP compatibility. WebSocket endpoints can also use GraphQL operation rules for GraphQL-over-WebSocket traffic. Omit for TCP passthrough. |
 | `tls` | string | No | TLS handling mode. The proxy auto-detects TLS by peeking the first bytes of each connection and terminates it for inspected HTTPS traffic, so this field is optional in most cases. Set to `skip` to disable auto-detection for edge cases such as client-certificate mTLS or non-standard protocols. The values `terminate` and `passthrough` are deprecated and log a warning; they are still accepted for backward compatibility but have no effect on behavior. |
 | `enforcement` | string | No | `enforce` actively blocks disallowed requests. `audit` logs violations but allows traffic through. |
-| `access` | string | No | Access preset. One of `read-only`, `read-write`, or `full`. Mutually exclusive with `rules`. Not valid on `protocol: mcp` or `protocol: json-rpc`; those endpoints must use explicit rules. |
+| `access` | string | No | Access preset. One of `read-only`, `read-write`, or `full`. Mutually exclusive with `rules`. Not valid on `protocol: mcp` or `protocol: json-rpc`; MCP endpoints can use explicit rules or omit rules for the default allow-all MCP policy, and generic JSON-RPC endpoints must use explicit rules. |
 | `rules` | list of allow rule objects | No | Fine-grained protocol-specific allow rules. Mutually exclusive with `access`. |
 | `deny_rules` | list of deny rule objects | No | L7 deny rules that block specific requests even when allowed by `access` or `rules`. Deny rules take precedence over allow rules. |
 | `allowed_ips` | list of string | No | CIDR or IP allowlist for SSRF override. Exact user-declared hostname endpoints may resolve to RFC 1918 private addresses without this field, but wildcard, hostless, and policy-advisor-proposed endpoints still require `allowed_ips` for private resolved IPs. Entries overlapping loopback (`127.0.0.0/8`), link-local (`169.254.0.0/16`), or unspecified (`0.0.0.0`) are rejected at load time. |
@@ -168,14 +168,14 @@ Each endpoint defines a reachable destination and optional inspection rules.
 | `persisted_queries` | string | No | GraphQL hash-only behavior for `protocol: graphql` and GraphQL-over-WebSocket operation policy. Default is `deny`; use `allow_registered` only with `graphql_persisted_queries`. |
 | `graphql_persisted_queries` | map | No | Trusted GraphQL persisted-query registry keyed by hash or saved-query ID. Values contain `operation_type`, optional `operation_name`, and optional root `fields`. |
 | `graphql_max_body_bytes` | integer | No | Maximum GraphQL-over-HTTP request body bytes buffered for inspection. Defaults to `65536`. |
-| `mcp` | object | No | MCP endpoint options. For `protocol: mcp`, `mcp.max_body_bytes` sets the maximum MCP JSON-RPC-over-HTTP request body bytes buffered for inspection. Defaults to `65536`. `mcp.strict_tool_names` defaults to `true` and requires `tools/call` `params.name` values to match `^[A-Za-z0-9_.-]{1,128}$` before policy evaluation. Set it to `false` only for compatibility with MCP servers that intentionally use non-recommended tool names. |
+| `mcp` | object | No | MCP endpoint options. For `protocol: mcp`, `mcp.max_body_bytes` sets the maximum MCP JSON-RPC-over-HTTP request body bytes buffered for inspection. Defaults to `65536`. `mcp.strict_tool_names` defaults to `true` and requires `tools/call` `params.name` values to match `^[A-Za-z0-9_.-]{1,128}$` before policy evaluation. Set it to `false` only for compatibility with MCP servers that intentionally use non-recommended tool names. `mcp.allow_all_known_mcp_methods` defaults to `true`; set it to `false` to require explicit MCP method rules. MCP endpoints must set a concrete `host` and `port` or `ports`; `protocol: mcp` alone is invalid and is not treated as a wildcard endpoint. |
 | `json_rpc` | object | No | JSON-RPC endpoint options. For `protocol: json-rpc`, `json_rpc.max_body_bytes` sets the maximum JSON-RPC-over-HTTP request body bytes buffered for inspection. Defaults to `65536`. |
 
 Credential rewrite recognizes the canonical `openshell:resolve:env:KEY` placeholder form and whole-token provider-shaped aliases such as `provider-OPENSHELL-RESOLVE-ENV-API_TOKEN` when the referenced environment key exists in the configured provider credentials.
 
 #### Access Levels
 
-The `access` field accepts one of the following values on REST, WebSocket, and GraphQL endpoints. MCP and JSON-RPC endpoints reject `access` because HTTP method/path presets cannot authorize JSON-RPC safely; use explicit rules instead.
+The `access` field accepts one of the following values on REST, WebSocket, and GraphQL endpoints. MCP and JSON-RPC endpoints reject `access` because HTTP method/path presets cannot authorize JSON-RPC safely; use explicit MCP or JSON-RPC rules instead, or omit MCP rules for the default allow-all MCP policy.
 
 | Value | REST expansion | WebSocket expansion | GraphQL expansion | MCP / JSON-RPC expansion |
 |---|---|---|---|---|
@@ -280,15 +280,15 @@ Do not combine `method`, `path`, or `query` with `operation_type`, `operation_na
 
 ##### MCP Allow And Deny Rules (`protocol: mcp`)
 
-MCP rules match sandbox-to-server MCP Streamable HTTP request bodies by MCP method and optional tool or params selectors. OpenShell parses the underlying JSON-RPC 2.0 envelope, validates known MCP request and notification params, and preserves unknown extension methods as policy-addressable method strings. By default, `tools/call` `params.name` must match the MCP-recommended tool-name pattern `^[A-Za-z0-9_.-]{1,128}$`; configure `mcp.strict_tool_names: false` on the endpoint to allow a server that intentionally uses names outside that pattern. JSON-RPC responses and server-to-client MCP messages on response bodies or SSE streams are relayed but are not currently parsed for policy enforcement.
+MCP rules match sandbox-to-server MCP Streamable HTTP request bodies by optional MCP method and optional tool selectors. OpenShell parses the underlying JSON-RPC 2.0 envelope, validates known MCP request and notification params, and preserves unknown extension methods as policy-addressable method strings. Until OpenShell exposes explicit MCP version profiles, `mcp.allow_all_known_mcp_methods` defaults to `true`; with that default, rules can omit `method` and tool selectors are normalized to `tools/call` internally. Set `mcp.allow_all_known_mcp_methods: false` to require explicit MCP method rules; in that mode, rules with `tool` or `params.name` must set `method: tools/call`. By default, `tools/call` `params.name` must match the MCP-recommended tool-name pattern `^[A-Za-z0-9_.-]{1,128}$`; configure `mcp.strict_tool_names: false` on the endpoint only to allow a server that intentionally uses names outside that pattern. Wildcard `tool` matchers require `mcp.strict_tool_names` to remain enabled. JSON-RPC responses and server-to-client MCP messages on response bodies or SSE streams are relayed but are not currently parsed for policy enforcement.
 
-Use `rules` for MCP allow rules and `deny_rules` for MCP deny rules. Deny rules take precedence over allow rules. In a batch request, one denied call denies the full batch.
+Use `rules` for MCP allow rules and `deny_rules` for MCP deny rules. Deny rules take precedence over allow rules. If an MCP endpoint omits `rules` while `mcp.allow_all_known_mcp_methods` is unset or `true`, OpenShell allows all MCP-family methods and all tools, then applies any `deny_rules`. If `mcp.allow_all_known_mcp_methods` is `false`, the endpoint must define explicit rules. A broad allow or deny rule whose method matcher includes `tools/call` cannot be combined with tool-specific allow rules because it would bypass or erase the tool filter; add `tool` or `params.name` to scope `tools/call`, or remove the tool-specific rules. In a batch request, one denied call denies the full batch.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `method` | string | Yes | MCP method name or OpenShell glob, such as `initialize`, `tools/list`, `tools/call`, or `tools/*`. `*` is OpenShell policy matching syntax, not JSON-RPC method syntax. |
-| `tool` | string | No | Convenience matcher for `tools/call` `params.name`. Omit to match every tool for the method. |
-| `params` | map | No | Nested params matcher map. Matcher leaves can be a glob string or an object with `any`. Dot-separated keys such as `arguments.repository` remain accepted for compatibility. Requests with literal `.` characters in params object keys are rejected before policy evaluation. |
+| `method` | string | No | MCP method name or OpenShell glob, such as `initialize`, `tools/list`, `tools/call`, or `tools/*`. Required when `mcp.allow_all_known_mcp_methods` is `false`; otherwise omitted method uses the endpoint method profile. `*` is OpenShell policy matching syntax, not JSON-RPC method syntax. |
+| `tool` | string or matcher | No | Convenience matcher for `tools/call` `params.name`. Supports a glob string or `{ any: [...] }`. When `mcp.allow_all_known_mcp_methods` is `false`, `method` must also be set to `tools/call`; validation fails otherwise. Omit to match every tool. |
+| `params` | map | No | MCP currently accepts only `params.name` as a lower-level tool-name matcher. When `mcp.allow_all_known_mcp_methods` is `false` and `params.name` is present, `method` must also be set to `tools/call`; validation fails otherwise. Tool argument matching is not supported yet; allowed tools accept all argument payloads by default. |
 
 Example MCP rules:
 
@@ -303,23 +303,13 @@ endpoints:
       max_body_bytes: 131072
     rules:
       - allow:
-          method: initialize
-      - allow:
-          method: tools/list
-      - allow:
-          method: tools/call
           tool: search_web
       - allow:
-          method: tools/call
-          tool: create_issue
-          params:
-            arguments:
-              repository: NVIDIA/OpenShell
+          tool:
+            any: [create_issue, list_issues]
     deny_rules:
-      - method: tools/call
-        tool: send_email
-      - method: tools/call
-        tool: execute_code
+      - tool: send_email
+      - tool: execute_code
 ```
 
 ##### JSON-RPC Allow Rule (`protocol: json-rpc`)
