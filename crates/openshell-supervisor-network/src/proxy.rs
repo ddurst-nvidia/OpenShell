@@ -3636,11 +3636,9 @@ async fn handle_forward_proxy(
                     }
                 };
                 forward_request_bytes = jsonrpc_request.raw_header;
-                Some(crate::l7::jsonrpc::parse_jsonrpc_body(
+                Some(crate::l7::jsonrpc::parse_jsonrpc_body_with_options(
                     &body,
-                    crate::l7::jsonrpc::JsonRpcInspectionMode::for_protocol(
-                        l7_config.config.protocol,
-                    ),
+                    crate::l7::jsonrpc::JsonRpcInspectionOptions::for_config(&l7_config.config),
                 ))
             }
         } else {
@@ -4362,6 +4360,7 @@ mod tests {
             enforcement: crate::l7::EnforcementMode::Enforce,
             graphql_max_body_bytes: crate::l7::graphql::DEFAULT_MAX_BODY_BYTES,
             json_rpc_max_body_bytes: crate::l7::jsonrpc::DEFAULT_MAX_BODY_BYTES,
+            mcp_strict_tool_names: true,
             allow_encoded_slash: false,
             websocket_credential_rewrite,
             request_body_credential_rewrite: false,
@@ -5125,6 +5124,7 @@ network_policies:
                     enforcement: crate::l7::EnforcementMode::Enforce,
                     graphql_max_body_bytes: crate::l7::graphql::DEFAULT_MAX_BODY_BYTES,
                     json_rpc_max_body_bytes: crate::l7::jsonrpc::DEFAULT_MAX_BODY_BYTES,
+                    mcp_strict_tool_names: true,
                     allow_encoded_slash: false,
                     websocket_credential_rewrite: false,
                     request_body_credential_rewrite: false,
@@ -5139,6 +5139,7 @@ network_policies:
                     enforcement: crate::l7::EnforcementMode::Enforce,
                     graphql_max_body_bytes: crate::l7::graphql::DEFAULT_MAX_BODY_BYTES,
                     json_rpc_max_body_bytes: crate::l7::jsonrpc::DEFAULT_MAX_BODY_BYTES,
+                    mcp_strict_tool_names: true,
                     allow_encoded_slash: false,
                     websocket_credential_rewrite: false,
                     request_body_credential_rewrite: false,

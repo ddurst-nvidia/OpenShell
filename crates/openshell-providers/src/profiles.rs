@@ -203,6 +203,8 @@ pub struct EndpointProfile {
     pub graphql_max_body_bytes: u32,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub json_rpc_max_body_bytes: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_strict_tool_names: Option<bool>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub path: String,
 }
@@ -747,6 +749,7 @@ fn endpoint_to_proto(endpoint: &EndpointProfile) -> NetworkEndpoint {
             .collect(),
         graphql_max_body_bytes: endpoint.graphql_max_body_bytes,
         json_rpc_max_body_bytes: endpoint.json_rpc_max_body_bytes,
+        mcp_strict_tool_names: endpoint.mcp_strict_tool_names,
         path: endpoint.path.clone(),
     }
 }
@@ -778,6 +781,7 @@ fn endpoint_from_proto(endpoint: &NetworkEndpoint) -> EndpointProfile {
             .collect(),
         graphql_max_body_bytes: endpoint.graphql_max_body_bytes,
         json_rpc_max_body_bytes: endpoint.json_rpc_max_body_bytes,
+        mcp_strict_tool_names: endpoint.mcp_strict_tool_names,
         path: endpoint.path.clone(),
     }
 }
@@ -1834,6 +1838,32 @@ discovery:
         let exported = profile_to_yaml(&from_proto).expect("yaml");
         assert!(exported.contains("discovery:"));
         assert!(exported.contains("api_key"));
+    }
+
+    #[test]
+    fn mcp_endpoint_strict_tool_names_round_trips_through_proto_and_yaml() {
+        let profile = parse_profile_yaml(
+            r"
+id: mcp-example
+display_name: MCP Example
+endpoints:
+  - host: mcp.example.com
+    port: 443
+    path: /mcp
+    protocol: mcp
+    mcp_strict_tool_names: false
+binaries:
+  - /usr/bin/example-agent
+",
+        )
+        .expect("profile should parse");
+
+        assert_eq!(profile.endpoints[0].mcp_strict_tool_names, Some(false));
+        let from_proto = ProviderTypeProfile::from_proto(&profile.to_proto());
+        assert_eq!(from_proto.endpoints[0].mcp_strict_tool_names, Some(false));
+
+        let exported = profile_to_yaml(&from_proto).expect("yaml");
+        assert!(exported.contains("mcp_strict_tool_names: false"));
     }
 
     #[test]

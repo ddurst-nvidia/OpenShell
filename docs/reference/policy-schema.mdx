@@ -168,7 +168,7 @@ Each endpoint defines a reachable destination and optional inspection rules.
 | `persisted_queries` | string | No | GraphQL hash-only behavior for `protocol: graphql` and GraphQL-over-WebSocket operation policy. Default is `deny`; use `allow_registered` only with `graphql_persisted_queries`. |
 | `graphql_persisted_queries` | map | No | Trusted GraphQL persisted-query registry keyed by hash or saved-query ID. Values contain `operation_type`, optional `operation_name`, and optional root `fields`. |
 | `graphql_max_body_bytes` | integer | No | Maximum GraphQL-over-HTTP request body bytes buffered for inspection. Defaults to `65536`. |
-| `mcp` | object | No | MCP endpoint options. For `protocol: mcp`, `mcp.max_body_bytes` sets the maximum MCP JSON-RPC-over-HTTP request body bytes buffered for inspection. Defaults to `65536`. |
+| `mcp` | object | No | MCP endpoint options. For `protocol: mcp`, `mcp.max_body_bytes` sets the maximum MCP JSON-RPC-over-HTTP request body bytes buffered for inspection. Defaults to `65536`. `mcp.strict_tool_names` defaults to `true` and requires `tools/call` `params.name` values to match `^[A-Za-z0-9_.-]{1,128}$` before policy evaluation. Set it to `false` only for compatibility with MCP servers that intentionally use non-recommended tool names. |
 | `json_rpc` | object | No | JSON-RPC endpoint options. For `protocol: json-rpc`, `json_rpc.max_body_bytes` sets the maximum JSON-RPC-over-HTTP request body bytes buffered for inspection. Defaults to `65536`. |
 
 Credential rewrite recognizes the canonical `openshell:resolve:env:KEY` placeholder form and whole-token provider-shaped aliases such as `provider-OPENSHELL-RESOLVE-ENV-API_TOKEN` when the referenced environment key exists in the configured provider credentials.
@@ -280,7 +280,7 @@ Do not combine `method`, `path`, or `query` with `operation_type`, `operation_na
 
 ##### MCP Allow And Deny Rules (`protocol: mcp`)
 
-MCP rules match sandbox-to-server MCP Streamable HTTP request bodies by MCP method and optional tool or params selectors. OpenShell parses the underlying JSON-RPC 2.0 envelope, validates known MCP request and notification params, and preserves unknown extension methods as policy-addressable method strings. JSON-RPC responses and server-to-client MCP messages on response bodies or SSE streams are relayed but are not currently parsed for policy enforcement.
+MCP rules match sandbox-to-server MCP Streamable HTTP request bodies by MCP method and optional tool or params selectors. OpenShell parses the underlying JSON-RPC 2.0 envelope, validates known MCP request and notification params, and preserves unknown extension methods as policy-addressable method strings. By default, `tools/call` `params.name` must match the MCP-recommended tool-name pattern `^[A-Za-z0-9_.-]{1,128}$`; configure `mcp.strict_tool_names: false` on the endpoint to allow a server that intentionally uses names outside that pattern. JSON-RPC responses and server-to-client MCP messages on response bodies or SSE streams are relayed but are not currently parsed for policy enforcement.
 
 Use `rules` for MCP allow rules and `deny_rules` for MCP deny rules. Deny rules take precedence over allow rules. In a batch request, one denied call denies the full batch.
 

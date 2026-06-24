@@ -848,15 +848,22 @@ fn normalize_jsonrpc_config_alias(ep: &mut serde_json::Map<String, serde_json::V
     let Some(config) = ep.remove(key) else {
         return;
     };
-    let Some(max_body_bytes) = config
-        .as_object()
-        .and_then(|obj| obj.get("max_body_bytes"))
-        .and_then(serde_json::Value::as_u64)
-    else {
+    let Some(config_obj) = config.as_object() else {
         return;
     };
-    ep.entry("json_rpc_max_body_bytes".to_string())
-        .or_insert_with(|| serde_json::json!(max_body_bytes));
+    if let Some(max_body_bytes) = config_obj
+        .get("max_body_bytes")
+        .and_then(serde_json::Value::as_u64)
+    {
+        ep.entry("json_rpc_max_body_bytes".to_string())
+            .or_insert_with(|| serde_json::json!(max_body_bytes));
+    }
+    if key == "mcp"
+        && let Some(strict_tool_names) = config_obj.get("strict_tool_names")
+    {
+        ep.entry("mcp_strict_tool_names".to_string())
+            .or_insert_with(|| strict_tool_names.clone());
+    }
 }
 
 fn normalize_l7_rules_aliases(ep: &mut serde_json::Map<String, serde_json::Value>) {
@@ -1286,6 +1293,9 @@ fn proto_to_opa_data_json(proto: &ProtoSandboxPolicy, entrypoint_pid: u32) -> St
                     }
                     if e.json_rpc_max_body_bytes > 0 {
                         ep["json_rpc_max_body_bytes"] = e.json_rpc_max_body_bytes.into();
+                    }
+                    if let Some(strict_tool_names) = e.mcp_strict_tool_names {
+                        ep["mcp_strict_tool_names"] = strict_tool_names.into();
                     }
                     ep
                 })
@@ -3450,6 +3460,44 @@ network_policies:
         let l7 = crate::l7::parse_l7_config(&config).unwrap();
         assert_eq!(l7.protocol, crate::l7::L7Protocol::Rest);
         assert_eq!(l7.enforcement, crate::l7::EnforcementMode::Enforce);
+    }
+
+    #[test]
+    fn l7_endpoint_config_preserves_mcp_strict_tool_names_opt_out() {
+        let data = r#"
+network_policies:
+  mcp:
+    name: mcp
+    endpoints:
+      - host: mcp.example.com
+        port: 443
+        path: /mcp
+        protocol: mcp
+        enforcement: enforce
+        mcp:
+          strict_tool_names: false
+        rules:
+          - allow:
+              method: tools/call
+    binaries:
+      - { path: /usr/bin/curl }
+"#;
+        let engine = OpaEngine::from_strings(TEST_POLICY, data).expect("engine from yaml");
+        let input = NetworkInput {
+            host: "mcp.example.com".into(),
+            port: 443,
+            binary_path: PathBuf::from("/usr/bin/curl"),
+            binary_sha256: "unused".into(),
+            ancestors: vec![],
+            cmdline_paths: vec![],
+        };
+        let config = engine
+            .query_endpoint_config(&input)
+            .expect("query endpoint config")
+            .expect("expected mcp endpoint config");
+        let l7 = crate::l7::parse_l7_config(&config).expect("parse l7 config");
+        assert_eq!(l7.protocol, crate::l7::L7Protocol::Mcp);
+        assert!(!l7.mcp_strict_tool_names);
     }
 
     #[test]

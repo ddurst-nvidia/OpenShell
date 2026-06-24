@@ -88,6 +88,9 @@ pub struct L7EndpointConfig {
     pub graphql_max_body_bytes: usize,
     /// Maximum JSON-RPC request body bytes to buffer for inspection.
     pub json_rpc_max_body_bytes: usize,
+    /// MCP-only strict validation for tools/call params.name. Defaults to true
+    /// for MCP endpoints and is ignored by other JSON-RPC-family protocols.
+    pub mcp_strict_tool_names: bool,
     /// When true, percent-encoded `/` (`%2F`) is preserved in path segments
     /// rather than rejected at the parser. Needed by upstreams like GitLab
     /// that embed `%2F` in namespaced project paths. Defaults to false.
@@ -183,6 +186,8 @@ pub fn parse_l7_config(val: &regorus::Value) -> Option<L7EndpointConfig> {
         .and_then(|v| usize::try_from(v).ok())
         .filter(|v| *v > 0)
         .unwrap_or(jsonrpc::DEFAULT_MAX_BODY_BYTES);
+    let mcp_strict_tool_names = protocol == L7Protocol::Mcp
+        && get_object_bool(val, "mcp_strict_tool_names").unwrap_or(true);
 
     Some(L7EndpointConfig {
         protocol,
@@ -191,6 +196,7 @@ pub fn parse_l7_config(val: &regorus::Value) -> Option<L7EndpointConfig> {
         enforcement,
         graphql_max_body_bytes,
         json_rpc_max_body_bytes,
+        mcp_strict_tool_names,
         allow_encoded_slash,
         websocket_credential_rewrite,
         request_body_credential_rewrite,
@@ -869,6 +875,20 @@ pub fn validate_l7_policies(data_json: &serde_json::Value) -> (Vec<String>, Vec<
                     "{loc}: JSON-RPC-specific endpoint fields are ignored unless protocol is json-rpc or mcp"
                 ));
             }
+            if ep.get("mcp_strict_tool_names").is_some() {
+                if ep
+                    .get("mcp_strict_tool_names")
+                    .and_then(serde_json::Value::as_bool)
+                    .is_none()
+                {
+                    errors.push(format!("{loc}: mcp.strict_tool_names must be boolean"));
+                }
+                if protocol != "mcp" {
+                    errors.push(format!(
+                        "{loc}: mcp.strict_tool_names is only valid for protocol mcp"
+                    ));
+                }
+            }
 
             if ep
                 .get("websocket_credential_rewrite")
@@ -1319,6 +1339,26 @@ mod tests {
     }
 
     #[test]
+    fn parse_l7_config_mcp_strict_tool_names_defaults_true() {
+        let val = regorus::Value::from_json_str(
+            r#"{"protocol": "mcp", "host": "mcp.example.com", "port": 443}"#,
+        )
+        .unwrap();
+        let config = parse_l7_config(&val).unwrap();
+        assert!(config.mcp_strict_tool_names);
+    }
+
+    #[test]
+    fn parse_l7_config_mcp_strict_tool_names_can_disable() {
+        let val = regorus::Value::from_json_str(
+            r#"{"protocol": "mcp", "host": "mcp.example.com", "port": 443, "mcp_strict_tool_names": false}"#,
+        )
+        .unwrap();
+        let config = parse_l7_config(&val).unwrap();
+        assert!(!config.mcp_strict_tool_names);
+    }
+
+    #[test]
     fn parse_l7_config_websocket_credential_rewrite_defaults_false() {
         let val = regorus::Value::from_json_str(
             r#"{"protocol": "rest", "host": "gateway.example.com", "port": 443}"#,
@@ -1674,6 +1714,69 @@ mod tests {
                 .iter()
                 .any(|e| { e.contains("deny_rules[0].params") && e.contains("only valid") }),
             "REST deny rules with JSON-RPC fields should be rejected: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_mcp_strict_tool_names_is_mcp_only() {
+        let data = serde_json::json!({
+            "network_policies": {
+                "test": {
+                    "endpoints": [
+                        {
+                            "host": "mcp.example.com",
+                            "port": 443,
+                            "path": "/mcp",
+                            "protocol": "mcp",
+                            "mcp_strict_tool_names": false,
+                            "rules": [{ "allow": { "method": "tools/call" } }]
+                        },
+                        {
+                            "host": "api.example.com",
+                            "port": 443,
+                            "protocol": "rest",
+                            "mcp_strict_tool_names": false,
+                            "access": "full"
+                        }
+                    ],
+                    "binaries": []
+                }
+            }
+        });
+        let (errors, _warnings) = validate_l7_policies(&data);
+        assert_eq!(
+            errors
+                .iter()
+                .filter(|error| error.contains("mcp.strict_tool_names"))
+                .count(),
+            1,
+            "only the REST endpoint should reject mcp.strict_tool_names: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_mcp_strict_tool_names_requires_bool() {
+        let data = serde_json::json!({
+            "network_policies": {
+                "test": {
+                    "endpoints": [{
+                        "host": "mcp.example.com",
+                        "port": 443,
+                        "path": "/mcp",
+                        "protocol": "mcp",
+                        "mcp_strict_tool_names": "false",
+                        "rules": [{ "allow": { "method": "tools/call" } }]
+                    }],
+                    "binaries": []
+                }
+            }
+        });
+        let (errors, _warnings) = validate_l7_policies(&data);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("mcp.strict_tool_names must be boolean")),
+            "expected bool validation error: {errors:?}"
         );
     }
 

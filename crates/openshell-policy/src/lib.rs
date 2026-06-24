@@ -172,10 +172,18 @@ fn json_rpc_config_from_proto(max_body_bytes: u32) -> Option<JsonRpcConfigDef> {
 struct McpConfigDef {
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     max_body_bytes: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    strict_tool_names: Option<bool>,
 }
 
-fn mcp_config_from_proto(max_body_bytes: u32) -> Option<McpConfigDef> {
-    (max_body_bytes > 0).then_some(McpConfigDef { max_body_bytes })
+fn mcp_config_from_proto(
+    max_body_bytes: u32,
+    strict_tool_names: Option<bool>,
+) -> Option<McpConfigDef> {
+    (max_body_bytes > 0 || strict_tool_names.is_some()).then_some(McpConfigDef {
+        max_body_bytes,
+        strict_tool_names,
+    })
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -460,6 +468,10 @@ fn json_rpc_max_body_bytes(json_rpc: &Option<JsonRpcConfigDef>, mcp: &Option<Mcp
     )
 }
 
+fn mcp_strict_tool_names(mcp: &Option<McpConfigDef>) -> Option<bool> {
+    mcp.as_ref().and_then(|config| config.strict_tool_names)
+}
+
 fn is_mcp_protocol(protocol: &str) -> bool {
     protocol.eq_ignore_ascii_case("mcp")
 }
@@ -606,6 +618,7 @@ fn to_proto(raw: PolicyFile) -> SandboxPolicy {
                                 .collect(),
                             graphql_max_body_bytes: e.graphql_max_body_bytes,
                             json_rpc_max_body_bytes: json_rpc_max_body_bytes(&e.json_rpc, &e.mcp),
+                            mcp_strict_tool_names: mcp_strict_tool_names(&e.mcp),
                         }
                     })
                     .collect(),
@@ -702,7 +715,13 @@ fn from_proto(policy: &SandboxPolicy) -> PolicyFile {
                             .map(|d| deny_proto_to_def(&protocol, d))
                             .collect();
                         let (json_rpc, mcp) = if is_mcp_protocol(&protocol) {
-                            (None, mcp_config_from_proto(e.json_rpc_max_body_bytes))
+                            (
+                                None,
+                                mcp_config_from_proto(
+                                    e.json_rpc_max_body_bytes,
+                                    e.mcp_strict_tool_names,
+                                ),
+                            )
                         } else {
                             (json_rpc_config_from_proto(e.json_rpc_max_body_bytes), None)
                         };
@@ -1970,6 +1989,7 @@ network_policies:
         enforcement: enforce
         mcp:
           max_body_bytes: 131072
+          strict_tool_names: false
         rules:
           - allow:
               method: initialize
@@ -1992,6 +2012,7 @@ network_policies:
 
         assert_eq!(ep.protocol, "mcp");
         assert_eq!(ep.json_rpc_max_body_bytes, 131_072);
+        assert_eq!(ep.mcp_strict_tool_names, Some(false));
         assert_eq!(ep.rules.len(), 3);
         assert_eq!(ep.rules[2].allow.as_ref().unwrap().method, "tools/call");
         assert_eq!(
@@ -2020,6 +2041,7 @@ network_policies:
         protocol: mcp
         mcp:
           max_body_bytes: 131072
+          strict_tool_names: false
         rules:
           - allow:
               method: tools/call
@@ -2046,6 +2068,7 @@ network_policies:
         assert!(yaml_out.contains("repository: NVIDIA/OpenShell"));
         assert!(!yaml_out.contains("arguments.repository"));
         assert!(yaml_out.contains("mcp:"));
+        assert!(yaml_out.contains("strict_tool_names: false"));
         assert_eq!(proto1, proto2);
     }
 

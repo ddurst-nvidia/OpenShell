@@ -324,9 +324,9 @@ where
                 )
                 .await
                 {
-                    Ok(body) => Some(crate::l7::jsonrpc::parse_jsonrpc_body(
+                    Ok(body) => Some(crate::l7::jsonrpc::parse_jsonrpc_body_with_options(
                         &body,
-                        crate::l7::jsonrpc::JsonRpcInspectionMode::for_protocol(config.protocol),
+                        crate::l7::jsonrpc::JsonRpcInspectionOptions::for_config(config),
                     )),
                     Err(e) => {
                         if is_benign_connection_error(&e) {
@@ -1031,7 +1031,7 @@ where
                 allow_encoded_slash: config.allow_encoded_slash,
                 ..Default::default()
             },
-            crate::l7::jsonrpc::JsonRpcInspectionMode::for_protocol(config.protocol),
+            crate::l7::jsonrpc::JsonRpcInspectionOptions::for_config(config),
         )
         .await
         {
@@ -2619,6 +2619,7 @@ network_policies:
             enforcement: EnforcementMode::Enforce,
             graphql_max_body_bytes: 0,
             json_rpc_max_body_bytes: crate::l7::jsonrpc::DEFAULT_MAX_BODY_BYTES,
+            mcp_strict_tool_names: true,
             allow_encoded_slash: false,
             websocket_credential_rewrite: true,
             request_body_credential_rewrite: false,
@@ -2723,6 +2724,7 @@ network_policies:
             enforcement: EnforcementMode::Enforce,
             graphql_max_body_bytes: 0,
             json_rpc_max_body_bytes: crate::l7::jsonrpc::DEFAULT_MAX_BODY_BYTES,
+            mcp_strict_tool_names: true,
             allow_encoded_slash: false,
             websocket_credential_rewrite: true,
             request_body_credential_rewrite: false,
@@ -2844,6 +2846,7 @@ network_policies:
             enforcement: EnforcementMode::Enforce,
             graphql_max_body_bytes: 0,
             json_rpc_max_body_bytes: crate::l7::jsonrpc::DEFAULT_MAX_BODY_BYTES,
+            mcp_strict_tool_names: true,
             allow_encoded_slash: false,
             websocket_credential_rewrite: true,
             request_body_credential_rewrite: false,

@@ -582,7 +582,7 @@ REST rules can also constrain query parameter values:
 
 ### MCP and JSON-RPC matching
 
-MCP endpoints use `protocol: mcp`. The proxy parses sandbox-to-server MCP Streamable HTTP request bodies, validates known MCP request and notification params, evaluates the MCP method against rule `method`, and can match tool calls with the `tool` alias. Generic JSON-RPC endpoints use `protocol: json-rpc`, evaluate `method`, and can match object params.
+MCP endpoints use `protocol: mcp`. The proxy parses sandbox-to-server MCP Streamable HTTP request bodies, validates known MCP request and notification params, evaluates the MCP method against rule `method`, and can match tool calls with the `tool` alias. By default, MCP `tools/call` tool names must match `^[A-Za-z0-9_.-]{1,128}$`; set `mcp.strict_tool_names: false` on that endpoint only when a server intentionally uses names outside the MCP-recommended pattern. Generic JSON-RPC endpoints use `protocol: json-rpc`, evaluate `method`, and can match object params.
 
 MCP policy enforcement is directional. It applies to HTTP request bodies sent by the sandboxed process to the configured endpoint. JSON-RPC responses and server-to-client MCP messages carried on response bodies or SSE streams are relayed but are not currently parsed for policy enforcement.
 
@@ -620,7 +620,7 @@ MCP and JSON-RPC endpoint policies currently require full policy YAML applied wi
       - { path: /usr/bin/python3 }
 ```
 
-`mcp.max_body_bytes` controls how many MCP-over-HTTP request body bytes OpenShell buffers for inspection. It defaults to `65536`.
+`mcp.max_body_bytes` controls how many MCP-over-HTTP request body bytes OpenShell buffers for inspection. It defaults to `65536`. `mcp.strict_tool_names` defaults to `true` for each MCP endpoint.
 
 Use `protocol: json-rpc` and `method` when you need generic JSON-RPC 2.0 matching for a non-MCP server. `json_rpc.max_body_bytes` controls the generic JSON-RPC inspection buffer.
 

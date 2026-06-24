@@ -33,6 +33,31 @@ impl JsonRpcInspectionMode {
     }
 }
 
+/// Endpoint-specific JSON-RPC-family parser settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JsonRpcInspectionOptions {
+    pub mode: JsonRpcInspectionMode,
+    pub mcp_strict_tool_names: bool,
+}
+
+impl JsonRpcInspectionOptions {
+    pub(crate) fn for_config(config: &crate::l7::L7EndpointConfig) -> Self {
+        Self {
+            mode: JsonRpcInspectionMode::for_protocol(config.protocol),
+            mcp_strict_tool_names: config.mcp_strict_tool_names,
+        }
+    }
+}
+
+impl From<JsonRpcInspectionMode> for JsonRpcInspectionOptions {
+    fn from(mode: JsonRpcInspectionMode) -> Self {
+        Self {
+            mode,
+            mcp_strict_tool_names: true,
+        }
+    }
+}
+
 /// Parsed HTTP request plus the JSON-RPC-family metadata extracted from the
 /// body. The original HTTP request is still forwarded if policy allows it.
 pub struct JsonRpcHttpRequest {
@@ -44,7 +69,7 @@ pub(crate) async fn parse_jsonrpc_http_request<C: AsyncRead + AsyncWrite + Unpin
     client: &mut C,
     max_body_bytes: usize,
     canonicalize_options: crate::l7::path::CanonicalizeOptions,
-    inspection_mode: JsonRpcInspectionMode,
+    inspection_options: JsonRpcInspectionOptions,
 ) -> Result<Option<JsonRpcHttpRequest>> {
     let provider = crate::l7::rest::RestProvider::with_options(canonicalize_options);
     let Some(mut request) = provider.parse_request(client).await? else {
@@ -58,7 +83,7 @@ pub(crate) async fn parse_jsonrpc_http_request<C: AsyncRead + AsyncWrite + Unpin
     }
     let body =
         crate::l7::http::read_body_for_inspection(client, &mut request, max_body_bytes).await?;
-    let info = parse_jsonrpc_body(&body, inspection_mode);
+    let info = parse_jsonrpc_body_with_options(&body, inspection_options);
     Ok(Some(JsonRpcHttpRequest { request, info }))
 }
 
@@ -156,6 +181,14 @@ pub fn parse_jsonrpc_body(
     body: &[u8],
     inspection_mode: JsonRpcInspectionMode,
 ) -> JsonRpcRequestInfo {
+    parse_jsonrpc_body_with_options(body, inspection_mode.into())
+}
+
+/// Parse a JSON-RPC-family body using the endpoint's inspection options.
+pub fn parse_jsonrpc_body_with_options(
+    body: &[u8],
+    inspection_options: JsonRpcInspectionOptions,
+) -> JsonRpcRequestInfo {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
         return JsonRpcRequestInfo {
             calls: Vec::new(),
@@ -179,7 +212,7 @@ pub fn parse_jsonrpc_body(
         let mut calls = Vec::new();
         let mut has_response = false;
         for item in &items {
-            match parse_jsonrpc_message(item, inspection_mode) {
+            match parse_jsonrpc_message(item, inspection_options) {
                 Ok(JsonRpcMessageInfo::Call(call)) => calls.push(call),
                 Ok(JsonRpcMessageInfo::Response) => has_response = true,
                 Err(error) => {
@@ -202,7 +235,7 @@ pub fn parse_jsonrpc_body(
         };
     }
 
-    match parse_jsonrpc_message(&value, inspection_mode) {
+    match parse_jsonrpc_message(&value, inspection_options) {
         Ok(JsonRpcMessageInfo::Call(call)) => JsonRpcRequestInfo {
             calls: vec![call],
             is_batch: false,
@@ -236,7 +269,7 @@ enum JsonRpcMessageInfo {
 // only after the common JSON-RPC version/method/response checks.
 fn parse_jsonrpc_message(
     value: &serde_json::Value,
-    inspection_mode: JsonRpcInspectionMode,
+    inspection_options: JsonRpcInspectionOptions,
 ) -> std::result::Result<JsonRpcMessageInfo, String> {
     let version = value
         .get("jsonrpc")
@@ -258,7 +291,7 @@ fn parse_jsonrpc_message(
     }
 
     if has_method {
-        return parse_jsonrpc_call(value, inspection_mode).map(JsonRpcMessageInfo::Call);
+        return parse_jsonrpc_call(value, inspection_options).map(JsonRpcMessageInfo::Call);
     }
 
     Err("missing or non-string 'method' field".to_string())
@@ -266,12 +299,12 @@ fn parse_jsonrpc_message(
 
 fn parse_jsonrpc_call(
     value: &serde_json::Value,
-    inspection_mode: JsonRpcInspectionMode,
+    inspection_options: JsonRpcInspectionOptions,
 ) -> std::result::Result<JsonRpcCallInfo, String> {
     // MCP mode delegates method-specific validation to tower-mcp-types. The
     // generic mode intentionally remains looser for non-MCP JSON-RPC servers.
-    if inspection_mode == JsonRpcInspectionMode::Mcp {
-        return parse_mcp_call(value);
+    if inspection_options.mode == JsonRpcInspectionMode::Mcp {
+        return parse_mcp_call(value, inspection_options.mcp_strict_tool_names);
     }
 
     let method = value
@@ -316,7 +349,10 @@ fn parse_jsonrpc_response(value: &serde_json::Value) -> std::result::Result<(), 
     Ok(())
 }
 
-fn parse_mcp_call(value: &serde_json::Value) -> std::result::Result<JsonRpcCallInfo, String> {
+fn parse_mcp_call(
+    value: &serde_json::Value,
+    strict_tool_names: bool,
+) -> std::result::Result<JsonRpcCallInfo, String> {
     if value.get("id").is_some() {
         // Requests can be converted into typed MCP variants, which gives us
         // method names and tool-call params without maintaining local copies of
@@ -328,11 +364,15 @@ fn parse_mcp_call(value: &serde_json::Value) -> std::result::Result<JsonRpcCallI
             .map_err(|error| format!("invalid MCP request: {error:?}"))?;
         let mcp_request = McpRequest::from_jsonrpc(&request)
             .map_err(|error| format!("invalid MCP request params: {error}"))?;
+        let tool = mcp_tool_name(&mcp_request);
+        if strict_tool_names && let Some(tool_name) = tool.as_deref() {
+            validate_mcp_tool_name(tool_name)?;
+        }
 
         return Ok(JsonRpcCallInfo {
             method: mcp_request.method_name().to_string(),
             params: flatten_jsonrpc_params_opt(request.params.as_ref())?,
-            tool: mcp_tool_name(&mcp_request),
+            tool,
         });
     }
 
@@ -376,6 +416,24 @@ fn mcp_tool_name(request: &McpRequest) -> Option<String> {
     } else {
         None
     }
+}
+
+// OpenShell's default MCP hardening enforces the spec-recommended tool-name
+// boundary for tools/call. The MCP spec presents this as SHOULD-level guidance,
+// so endpoint policy can disable it for compatibility with existing servers.
+fn validate_mcp_tool_name(name: &str) -> std::result::Result<(), String> {
+    if name.is_empty()
+        || name.len() > 128
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+    {
+        return Err(
+            "MCP tool name must match ^[A-Za-z0-9_.-]{1,128}$ when strict_tool_names is enabled"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 fn canonical_params_map(params: &HashMap<String, String>) -> BTreeMap<String, String> {
@@ -507,6 +565,39 @@ mod tests {
             call.params.get("arguments.query").map(String::as_str),
             Some("openshell")
         );
+    }
+
+    #[test]
+    fn mcp_mode_rejects_non_recommended_tool_names_by_default() {
+        let body = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read status","arguments":{}}}"#;
+        let info = parse_jsonrpc_body(body, JsonRpcInspectionMode::Mcp);
+
+        assert!(info.calls.is_empty());
+        assert!(
+            info.error
+                .as_deref()
+                .is_some_and(|error| error.contains("strict_tool_names")),
+            "expected strict tool-name error, got {info:?}"
+        );
+    }
+
+    #[test]
+    fn mcp_mode_can_disable_strict_tool_names() {
+        let body = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read status","arguments":{}}}"#;
+        let info = parse_jsonrpc_body_with_options(
+            body,
+            JsonRpcInspectionOptions {
+                mode: JsonRpcInspectionMode::Mcp,
+                mcp_strict_tool_names: false,
+            },
+        );
+
+        let call = info
+            .calls
+            .first()
+            .expect("permissive MCP call should parse");
+        assert!(info.error.is_none(), "permissive MCP call failed: {info:?}");
+        assert_eq!(call.tool.as_deref(), Some("read status"));
     }
 
     #[test]
