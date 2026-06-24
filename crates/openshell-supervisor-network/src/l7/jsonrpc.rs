@@ -354,13 +354,8 @@ fn parse_mcp_call(
     strict_tool_names: bool,
 ) -> std::result::Result<JsonRpcCallInfo, String> {
     if value.get("id").is_some() {
-        // Requests can be converted into typed MCP variants, which gives us
-        // method names and tool-call params without maintaining local copies of
-        // the MCP request schema. That parser surface is useful for validation,
-        // but it can span legacy, current, draft, and extension methods at the
-        // same time. That reinforces the need for an OpenShell-owned static
-        // method profile rather than relying on the dependency enum as the
-        // policy contract.
+        // Typed parsing validates known MCP params, but policy method profiles
+        // stay OpenShell-owned; see McpOptions in proto/sandbox.proto.
         let request: JsonRpcRequest = serde_json::from_value(value.clone())
             .map_err(|error| format!("invalid MCP request: {error}"))?;
         request
@@ -423,11 +418,7 @@ fn mcp_tool_name(request: &McpRequest) -> Option<String> {
 }
 
 // OpenShell's default MCP hardening enforces the spec-recommended tool-name
-// boundary for tools/call. The MCP spec presents this as SHOULD-level guidance,
-// so endpoint policy can disable it for compatibility with existing servers.
-// Sources:
-// - https://modelcontextprotocol.io/specification/2025-11-25/server/tools#tool-names
-// - https://modelcontextprotocol.io/specification/draft/server/tools#tool-names
+// boundary for tools/call. See McpOptions in proto/sandbox.proto for sources.
 fn validate_mcp_tool_name(name: &str) -> std::result::Result<(), String> {
     if name.is_empty()
         || name.len() > 128

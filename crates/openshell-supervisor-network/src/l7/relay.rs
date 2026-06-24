@@ -1024,17 +1024,9 @@ where
             return Ok(());
         }
 
-        // If policy grows an MCP version profile for the 2026-07-28 draft, the
-        // request-side checks should hook into this parse/evaluate path before
-        // OPA sees the call. Candidate MCP-only checks: require
-        // MCP-Protocol-Version and request params._meta protocolVersion to
-        // match, require clientInfo/clientCapabilities metadata, reject the
-        // removed GET receive-stream lifecycle, and validate draft mirrored
-        // headers such as Mcp-Method/Mcp-Name against the JSON-RPC body.
-        //
-        // Sources:
-        // - https://modelcontextprotocol.io/specification/draft/changelog
-        // - https://modelcontextprotocol.io/specification/draft/basic/transports/streamable-http
+        // Future MCP version-profile request checks should hook here before OPA
+        // evaluation. See McpOptions in proto/sandbox.proto for the policy
+        // roadmap and source documentation.
         let parsed = match crate::l7::jsonrpc::parse_jsonrpc_http_request(
             client,
             config.json_rpc_max_body_bytes,
@@ -1150,24 +1142,11 @@ where
         }
 
         if allowed || (config.enforcement == EnforcementMode::Audit && !force_deny) {
-            // Future MCP response introspection/rewrite would hook here, before
-            // relaying upstream bytes back to the sandboxed client. Candidate
-            // 2026-07-28 profile behaviors include sanitizing tools/list
-            // annotations from untrusted servers, validating tool-list
-            // uniqueness and deterministic-list assumptions, rejecting invalid
-            // x-mcp-header annotations from tool definitions, checking required
-            // resultType plus ttlMs/cacheScope on cacheable results, and
-            // rejecting independent server-to-client JSON-RPC requests on SSE
-            // streams while allowing request-scoped notifications and
-            // subscriptions/listen. There is intentionally no policy schema
-            // field such as mcp.trusted_annotations or mcp.version_profile
-            // today, so MCP responses and SSE streams are relayed unchanged.
-            //
-            // Sources:
-            // - https://modelcontextprotocol.io/specification/2025-11-25/server/tools
-            // - https://modelcontextprotocol.io/specification/draft/changelog
-            // - https://modelcontextprotocol.io/specification/draft/basic/transports/streamable-http
-            // - https://modelcontextprotocol.io/specification/draft/server/tools
+            // Future MCP response/SSE introspection or rewrite would hook here
+            // before returning upstream bytes. The current policy schema has no
+            // trusted-annotations or version-profile field, so MCP responses and
+            // SSE streams are relayed unchanged; see McpOptions in
+            // proto/sandbox.proto for planned policy extensions.
             let outcome = crate::l7::rest::relay_http_request_with_resolver_guarded(
                 &req,
                 client,
